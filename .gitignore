@@ -1,0 +1,6 @@
+# Downloaded Instagram media and run artifacts (do not redistribute)
+/downloads/
+
+# Python
+__pycache__/
+*.pyc
