@@ -24,3 +24,13 @@ Keep timestamps. If no speech recognizer is available, ask permission before ins
 ## Anki
 
 Anki Desktop and the AnkiConnect add-on must be running. The default endpoint is `http://127.0.0.1:8765`. The importer uses the built-in `Basic` note type and HTML5 `<video>` tags for video; playback support can vary by Anki client.
+
+## Local pronunciation (TTS)
+
+`scripts/tts_word.py` synthesizes an English pronunciation MP3 per word, fully local. On Windows it uses System.Speech (SAPI) for synthesis and `ffmpeg` to encode the MP3:
+
+```powershell
+python scripts/tts_word.py "shareholder" --output-dir downloads/audio
+```
+
+The script picks the first enabled `en-*` SAPI voice and writes `ig2anki_<word>.mp3` to the output dir. If no English voice is installed, install one (Windows Settings → Time & Language → Speech → Add voices) and retry. On other platforms, adapt the synth step to `say` (macOS) or `espeak-ng` (Linux).

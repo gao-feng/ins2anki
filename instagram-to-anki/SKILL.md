@@ -34,11 +34,12 @@ Do not invent dialogue or definitions. Mark uncertain transcription explicitly.
 
 ## 3. Ask for confirmation
 
-Present a numbered candidate list and ask the user to confirm all three dimensions:
+Present a numbered candidate list and ask the user to confirm all four dimensions:
 
 1. which word numbers to save;
 2. whether to use the proposed meanings or provide edits;
-3. whether to attach the original video/image to every selected note, attach it only to specified notes, or omit it.
+3. whether to attach the original video/image to every selected note, attach it only to specified notes, or omit it;
+4. whether to add a local TTS pronunciation audio of the word to each note. It is synthesized locally with `scripts/tts_word.py` (Windows SAPI + ffmpeg) and embedded on the Front so the word plays with the card. Default to on.
 
 Also ask for an Anki deck name only if the user has not already specified one; default to `ins` when they express no preference.
 
@@ -46,13 +47,23 @@ Stop here. Do not invoke AnkiConnect, create a deck, upload media, or add notes 
 
 ## 4. Save the confirmed notes
 
-Create a UTF-8 JSON file matching [references/selection-schema.md](references/selection-schema.md). Include only confirmed entries and meanings. Run:
+Create a UTF-8 JSON file matching [references/selection-schema.md](references/selection-schema.md). Include only confirmed entries and meanings.
+
+If pronunciation was confirmed, generate the audio first — for each confirmed word run:
+
+```powershell
+python scripts/tts_word.py "WORD" --output-dir DIR
+```
+
+The script prints the generated `ig2anki_<word>.mp3` path; put that path in the entry's `pronunciation` field. The importer uploads it once and embeds `[sound:...]` on the Front.
+
+Then run:
 
 ```powershell
 python scripts/anki_import.py --selection selection.json
 ```
 
-Anki Desktop must be running with AnkiConnect reachable at `http://127.0.0.1:8765`. The script creates the deck, uploads each referenced media file once, and adds Basic notes with the word on the front and meaning, context, source link, position, and optional media on the back.
+Anki Desktop must be running with AnkiConnect reachable at `http://127.0.0.1:8765`. The script creates the deck, uploads each referenced media file once, and adds Basic notes with the word (plus optional `[sound:...]` pronunciation) on the front and meaning, context, source link, position, and optional media on the back.
 
 If AnkiConnect is unavailable, explain how to start Anki/install AnkiConnect and retain the selection JSON for retry. Never report success unless the script returns `addedNoteIds` for every requested note. If some notes fail, report exact failures and do not silently retry with modified content.
 

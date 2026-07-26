@@ -69,6 +69,13 @@ def main() -> int:
             parser.error(f"entry {index} requires word and meaning")
         meaning_html = html.escape(meaning).replace("\n", "<br>")
         blocks = [f"<div>{meaning_html}</div>"]
+        front = html.escape(word)
+        pron = entry.get("pronunciation")
+        if pron:
+            p = Path(str(pron)).resolve()
+            if str(p) not in cache:
+                cache[str(p)] = upload(args.endpoint, p)
+            front = f"{front}[sound:{cache[str(p)]}]"
         for key, label in (("context", "Context"), ("position", "Position"), ("source_url", "Source")):
             value = str(entry.get(key, "")).strip()
             if value:
@@ -82,7 +89,7 @@ def main() -> int:
         notes.append({
             "deckName": deck,
             "modelName": "Basic",
-            "fields": {"Front": html.escape(word), "Back": "\n".join(blocks)},
+            "fields": {"Front": front, "Back": "\n".join(blocks)},
             "options": {"allowDuplicate": False},
             "tags": entry.get("tags", ["instagram-to-anki"]),
         })
