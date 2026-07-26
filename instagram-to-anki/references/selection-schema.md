@@ -4,11 +4,11 @@ Use UTF-8 JSON. Paths may be absolute or relative to the process working directo
 
 ```json
 {
-  "deck": "Instagram English",
+  "deck": "ins",
   "entries": [
     {
       "word": "counterintuitive",
-      "meaning": "反直觉的",
+      "meaning": "adj.\n/ˌkaʊntərɪnˈtuːɪtɪv/\n反直觉的；与直觉相悖的\n用法：常修饰 result / idea / approach，强调结果出乎意料却可能成立",
       "context": "It sounds counterintuitive, but it works.",
       "position": "00:18",
       "source_url": "https://www.instagram.com/reel/example/",

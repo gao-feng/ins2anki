@@ -53,7 +53,7 @@ def main() -> int:
     parser.add_argument("--endpoint", default="http://127.0.0.1:8765")
     args = parser.parse_args()
     data = json.loads(args.selection.read_text(encoding="utf-8"))
-    deck = data.get("deck", "Instagram English")
+    deck = data.get("deck", "ins")
     entries = data.get("entries")
     if not isinstance(entries, list) or not entries:
         parser.error("selection must contain a non-empty entries array")
@@ -67,7 +67,8 @@ def main() -> int:
         meaning = str(entry.get("meaning", "")).strip()
         if not word or not meaning:
             parser.error(f"entry {index} requires word and meaning")
-        blocks = [f"<div>{html.escape(meaning)}</div>"]
+        meaning_html = html.escape(meaning).replace("\n", "<br>")
+        blocks = [f"<div>{meaning_html}</div>"]
         for key, label in (("context", "Context"), ("position", "Position"), ("source_url", "Source")):
             value = str(entry.get(key, "")).strip()
             if value:

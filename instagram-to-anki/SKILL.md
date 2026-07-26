@@ -25,7 +25,7 @@ Select genuinely challenging, useful words or short fixed expressions. Exclude n
 For each candidate provide:
 
 - word or expression;
-- concise Chinese meaning appropriate to this exact context;
+- detailed Chinese meaning, structured as one part per line: part of speech; IPA phonetics when it aids pronunciation; the precise sense in this exact context; other common senses briefly, only when they help learning; and a short usage or collocation note when relevant. Put each part on its own line so the importer can render line breaks. Stay context-appropriate and do not pad with unrelated senses;
 - source sentence or a short faithful context excerpt;
 - timestamp for video, or image index for a carousel;
 - brief reason it may be difficult (idiom, phrasal verb, academic word, uncommon sense, etc.).
@@ -40,7 +40,7 @@ Present a numbered candidate list and ask the user to confirm all three dimensio
 2. whether to use the proposed meanings or provide edits;
 3. whether to attach the original video/image to every selected note, attach it only to specified notes, or omit it.
 
-Also ask for an Anki deck name only if the user has not already specified one; default to `Instagram English` when they express no preference.
+Also ask for an Anki deck name only if the user has not already specified one; default to `ins` when they express no preference.
 
 Stop here. Do not invoke AnkiConnect, create a deck, upload media, or add notes until an explicit reply confirms the selection. A vague response such as “looks good” counts only when the presented choices and default media behavior were unambiguous.
 
