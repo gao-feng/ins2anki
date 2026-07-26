@@ -1,0 +1,4 @@
+interface:
+  display_name: "Instagram to Anki"
+  short_description: "提取 Instagram 英语词汇并保存到 Anki"
+  default_prompt: "Use $instagram-to-anki to download this Instagram post, extract challenging English words, and let me confirm the Anki cards."
