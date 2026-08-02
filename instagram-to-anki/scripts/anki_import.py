@@ -17,7 +17,7 @@ def invoke(endpoint: str, action: str, params: dict | None = None):
     payload = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
     request = urllib.request.Request(endpoint, payload, {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=120) as response:
             body = json.load(response)
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Cannot reach AnkiConnect at {endpoint}: {exc}") from exc
@@ -43,7 +43,11 @@ def media_html(filename: str) -> str:
     if mime.startswith("audio/"):
         return f"[sound:{safe}]"
     if mime.startswith("video/"):
-        return f'<video controls src="{safe}"></video>'
+        # Anki's native media marker is handled consistently by Desktop,
+        # AnkiMobile, and AnkiDroid. Raw HTML <video> playback depends on the
+        # client's embedded webview and can silently fail on otherwise valid
+        # H.264/AAC files.
+        return f"[sound:{safe}]"
     return f'<a href="{safe}">{safe}</a>'
 
 

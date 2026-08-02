@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Generate an English pronunciation MP3 for a word with local TTS.
 
+macOS: `say` synthesizes an AIFF using the first available built-in English
+voice, then ffmpeg encodes the MP3.
 Windows: System.Speech (SAPI) synthesizes a WAV, then ffmpeg encodes the MP3.
-The script picks the first enabled en-* SAPI voice. On other platforms, adapt
-the synth step to `say` (macOS) or `espeak-ng` (Linux).
+On other platforms, extend the branch below to `espeak-ng` or another synth.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -22,21 +24,40 @@ def slugify(word: str) -> str:
     return s.strip("_")
 
 
-def synth_wav(word: str, wav_path: Path) -> None:
+def synth_macos(word: str, audio_path: Path) -> None:
+    # Prefer built-in English voices; fall back to the system default voice.
+    for voice in ("Samantha", "Daniel", "Karen", "Moira", "Tessa"):
+        try:
+            subprocess.run(
+                ["say", "-v", voice, "-o", str(audio_path), word],
+                check=True,
+            )
+            return
+        except subprocess.CalledProcessError:
+            continue
+    # Fall back to default voice (language depends on the system setting).
+    subprocess.run(["say", "-o", str(audio_path), word], check=True)
+
+
+def synth_windows(word: str, wav_path: Path) -> None:
     env = os.environ.copy()
     env["IG2ANKI_WORD"] = word
     env["IG2ANKI_WAV"] = str(wav_path)
-    script = ";".join([
-        "Add-Type -AssemblyName System.Speech",
-        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer",
-        "$en = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'en-*' } | Select-Object -First 1",
-        "if (-not $en) { throw 'No enabled English SAPI voice found' }",
-        "$s.SelectVoice($en.VoiceInfo.Name)",
-        "$s.SetOutputToWaveFile($env:IG2ANKI_WAV)",
-        "$s.Speak($env:IG2ANKI_WORD)",
-        "$s.Dispose()",
-    ])
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True, env=env)
+    script = ";".join(
+        [
+            "Add-Type -AssemblyName System.Speech",
+            "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer",
+            "$en = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -like 'en-*' } | Select-Object -First 1",
+            "if (-not $en) { throw 'No enabled English SAPI voice found' }",
+            "$s.SelectVoice($en.VoiceInfo.Name)",
+            "$s.SetOutputToWaveFile($env:IG2ANKI_WAV)",
+            "$s.Speak($env:IG2ANKI_WORD)",
+            "$s.Dispose()",
+        ]
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", script], check=True, env=env
+    )
 
 
 def main() -> int:
@@ -53,14 +74,33 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"ig2anki_{slugify(args.word)}.mp3"
 
+    if sys.platform == "darwin":
+        synth = synth_macos
+        ext = ".aiff"
+    else:
+        synth = synth_windows
+        ext = ".wav"
+
     with tempfile.TemporaryDirectory() as tmp:
-        wav = Path(tmp) / "tts.wav"
+        audio = Path(tmp) / f"tts{ext}"
         try:
-            synth_wav(args.word, wav)
+            synth(args.word, audio)
         except subprocess.CalledProcessError as exc:
             print(f"TTS failed: {exc}", file=sys.stderr)
             return exc.returncode or 1
-        cmd = [ffmpeg, "-y", "-i", str(wav), "-codec:a", "libmp3lame", "-b:a", "64k", "-ac", "1", str(out_path)]
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(audio),
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "64k",
+            "-ac",
+            "1",
+            str(out_path),
+        ]
         completed = subprocess.run(cmd, text=True)
         if completed.returncode:
             return completed.returncode
