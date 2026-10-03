@@ -1,7 +1,11 @@
-# Downloaded Instagram media and run artifacts (do not redistribute)
+# Downloaded media and run artifacts (do not redistribute)
 /downloads/
 /.codex-work/
 /instagram-saved/
+
+# Personal saved-collection inventories (account + private post URLs)
+/collections.json
+/favorites-inventory.json
 
 # Python
 __pycache__/
