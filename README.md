@@ -28,6 +28,7 @@ saved-sync/
     sync_common.py            # shared incremental engine + state/validation
     download_media.py         # yt-dlp wrapper (H.264-first; keeps one full-size file per image)
     clean_images.py           # drop the 图文 preview copies from an already-synced tree
+    retitle_items.py          # name an already-synced tree after its titles
     platforms.py              # URL detection/normalization for all 3 platforms
     anki_import.py            # AnkiConnect importer (notes + media)
     tts_word.py               # local TTS pronunciation (Windows SAPI + ffmpeg)
@@ -49,6 +50,7 @@ saved-sync/
     test_favorites_sync.py    # 小红书/抖音 one-command sync
     test_playback.py          # playability checks + repair
     test_image_variants.py    # full-size vs preview image selection + the cleaner
+    test_retitle.py           # title-based directory/file naming + the migrator
     test_sync_saved.py        # inventory-based fallback (single collection)
     test_sync_instagram_saved.py  # compatibility wrappers
 ```
@@ -378,5 +380,6 @@ missing posts.
 - Download only content you are authorized to access; do not bypass access controls or redistribute fetched media.
 - The importer never reports success unless AnkiConnect returns `addedNoteIds` for every requested note; duplicate or partial failures are reported verbatim, not silently retried.
 - Xiaohongshu image notes (图文) are downloaded as their full image list, and only the **full-size** copy of each image is kept: the extractor lists a preview (`!nd_prv_...`) next to every image (`!nd_dft_...`) with the same pixel dimensions, so the variant in the URL is what decides — never the file size. Items synced before that rule existed are cleaned with `python3 scripts/clean_images.py --root xhs-saved` (`--dry-run` first if you like), which also repoints their manifests at the current checkout. Along the `yt-dlp` path Douyin image notes (`/note/<id>`) are **not** supported — `yt-dlp` exposes only a video cover, so they are marked `failed` with an explicit reason instead of being saved as a single cover. The `favorites_sync.py` session path downloads them from the image URLs the page itself received.
+- Saved items are named after their **title**, not their note/aweme id: the downloaders still write `<id>_<title>.<n>.<ext>` into `<output>/<id>`, and the shared engine renames both the folder and the files as soon as the title is in the manifest, so an 图文 note reads `显微镜视野如何调节为一个视野/显微镜视野如何调节为一个视野.1.jpg`. Two items can share a title — the second becomes `<title> (2)`. Items whose platform offers no real title (Instagram only ever reports `Video by <user>`) keep their shortcode. Trees synced before this are renamed in place with `python3 scripts/retitle_items.py --root xhs-saved` (`--dry-run` first); it also repoints their `sync-state.json`, so nothing is downloaded twice.
 - Item state (`sync-state.json`) is per output directory. An item counts as completed only while its manifest still references a non-empty media file; if the media is deleted, the next run re-downloads it.
 - After editing any skill file, restart opencode so the change takes effect.

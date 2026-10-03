@@ -35,17 +35,19 @@ non-empty media file. If the media disappears, the next run marks it
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from download_media import collect_media
 from platforms import collection_suffix
 
 
@@ -155,6 +157,231 @@ def safe_directory_name(value: str, fallback: str = "collection") -> str:
     name = INVALID_PATH_CHARS.sub("_", name)
     name = WHITESPACE.sub(" ", name).strip(" .")
     return name[:100] or fallback
+
+
+def truncate_utf8(value: str, limit: int) -> str:
+    """Cut a string to at most ``limit`` UTF-8 bytes, on a character boundary."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= limit:
+        return value
+    return encoded[:limit].decode("utf-8", "ignore").strip()
+
+
+def safe_title(value: str, fallback: str = "", limit: int = 120) -> str:
+    """Filesystem-safe, byte-limited name built from an item title.
+
+    The byte limit is what matters: APFS/HFS+ cap one name at 255 UTF-8 bytes,
+    and a Chinese title costs three bytes per character, so cutting by character
+    count would still produce a name the filesystem refuses.
+    """
+    name = unicodedata.normalize("NFKC", value)
+    name = INVALID_PATH_CHARS.sub("_", name)
+    name = WHITESPACE.sub(" ", name).strip(" .")
+    shortened = truncate_utf8(name, limit)
+    if shortened != name:
+        # Cut at a word boundary when that keeps most of the title, so a long
+        # Douyin caption does not end in the middle of a hashtag.
+        boundary = shortened.rfind(" ")
+        if boundary > len(shortened) // 2:
+            shortened = shortened[:boundary]
+    return shortened.strip(" .") or fallback
+
+
+#: yt-dlp's placeholder caption for a post that carries no title of its own.
+PLACEHOLDER_TITLE = re.compile(r"^Video by \S+$")
+
+
+def manifest_title(directory: Path) -> str:
+    """Read the item title the downloader recorded in its own manifest."""
+    try:
+        data = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    for entry in metadata or []:
+        if isinstance(entry, dict):
+            title = str(entry.get("title") or "").strip()
+            if title and not PLACEHOLDER_TITLE.match(title):
+                return title
+    return ""
+
+
+def item_directory(item: dict[str, Any], output_dir: Path, item_id: str) -> Path:
+    """Where an item lives: the directory the state remembers, else its id.
+
+    The remembered path is what makes a title-named item stable across runs;
+    ``<output>/<item id>`` remains the landing zone for a new item and the
+    fallback after a manifest was deleted by hand.
+    """
+    stored = item.get("output_dir")
+    if stored:
+        path = Path(str(stored))
+        if path.is_dir():
+            return path
+    return output_dir / item_id
+
+
+#: Compound suffixes yt-dlp writes next to the media itself.
+COMPOUND_SUFFIXES = (".info.json", ".description")
+
+#: Serialises directory renames, which two worker threads could race on.
+RETITLE_LOCK = threading.Lock()
+
+
+def split_download_name(name: str) -> tuple[str, str]:
+    """Split a downloaded file name into ``(image index, suffix)``.
+
+    Image notes number their files (``.0.jpg``, ``_3.jpg``) and videos do not,
+    while the info/description sidecars carry a compound suffix that must keep
+    its ``.info`` part.
+    """
+    for suffix in COMPOUND_SUFFIXES:
+        if name.endswith(suffix):
+            return "", suffix
+    stem, dot, extension = name.rpartition(".")
+    if not dot:
+        return "", ""
+    match = re.search(r"[._](\d+)$", stem)
+    if match:
+        return match.group(1), f".{extension}"
+    return "", f".{extension}"
+
+
+def plan_titles(directory: Path, title: str) -> dict[str, str]:
+    """Map every file in ``directory`` to the name it should have.
+
+    Numbered images keep their order and are renumbered ``.1``…``.N`` (already
+    consecutive numbers are left alone, so the rename is idempotent) and every
+    other file is named after the title. Collisions get a ``-2`` counter.
+    """
+    indexed: list[tuple[int, str, str]] = []
+    plain: list[tuple[str, str]] = []
+    for path in sorted(directory.iterdir()):
+        if not path.is_file() or path.name == "manifest.json":
+            continue
+        index, suffix = split_download_name(path.name)
+        if index:
+            indexed.append((int(index), path.name, suffix))
+        else:
+            plain.append((path.name, suffix))
+
+    indexed.sort(key=lambda entry: (entry[0], entry[1]))
+    renumber = [entry[0] for entry in indexed] != list(range(1, len(indexed) + 1))
+
+    used: set[str] = set()
+
+    def claim(base: str, suffix: str) -> str:
+        candidate = f"{base}{suffix}"
+        counter = 2
+        while candidate in used or candidate == "manifest.json":
+            candidate = f"{base}-{counter}{suffix}"
+            counter += 1
+        used.add(candidate)
+        return candidate
+
+    planned: dict[str, str] = {}
+    for position, (index, name, suffix) in enumerate(indexed, 1):
+        number = position if renumber else index
+        planned[name] = claim(f"{title}.{number}", suffix)
+    for name, suffix in plain:
+        planned[name] = claim(title, suffix)
+    return planned
+
+
+def rewrite_manifest_paths(directory: Path, planned: dict[str, str]) -> None:
+    """Repoint a manifest at the files after they were renamed."""
+    manifest = directory / "manifest.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["media"] = collect_media(directory)
+    # Tell later passes that the file numbers are sequence numbers now, not the
+    # thumbnail ids a downloader wrote, so nothing tries to pair them up again.
+    data["file_names"] = "title"
+    for entry in data.get("metadata") or []:
+        if not isinstance(entry, dict):
+            continue
+        info = entry.get("info_json")
+        if info:
+            old_name = Path(str(info)).name
+            entry["info_json"] = str(directory / planned.get(old_name, old_name))
+    write_json_atomic(manifest, data)
+
+
+def is_title_named(directory: Path) -> bool:
+    """Whether an item's files were already renamed after its title."""
+    try:
+        data = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(data, dict) and data.get("file_names") == "title"
+
+
+def retitle_item(directory: Path, dry_run: bool = False) -> Path:
+    """Rename an item's files and folder after its title.
+
+    Downloads land in ``<output>/<item id>`` behind ``<item id>_`` file prefixes:
+    right for the state machine, unreadable in a file browser. Once the
+    downloader has written the title into the manifest, both are named after it.
+    An item without a title, or one that already carries the title, is left
+    exactly as it is.
+    """
+    title = safe_title(manifest_title(directory))
+    if not title or not directory.is_dir():
+        return directory
+    planned = plan_titles(directory, title)
+    already_titled = directory.name == title
+    if already_titled and all(name == target for name, target in planned.items()):
+        # Already renamed, possibly before the marker existed: stamp it so the
+        # preview cleaner knows not to pair these files up again.
+        if not is_title_named(directory):
+            rewrite_manifest_paths(directory, planned)
+        return directory
+    if dry_run:
+        return directory if already_titled else _title_directory(directory.parent, title)
+
+    moves = [
+        (name, target) for name, target in planned.items() if name != target
+    ]
+    finished: list[tuple[str, str]] = []
+    try:
+        # Two phases: park every file under a temporary name first, so a target
+        # can reuse a name another file is about to give up.
+        for position, (name, _target) in enumerate(moves):
+            (directory / name).rename(directory / f".retitle-{position}")
+        for position, (name, target) in enumerate(moves):
+            (directory / f".retitle-{position}").rename(directory / target)
+            finished.append((name, target))
+    except OSError:
+        for name, target in reversed(finished):
+            try:
+                (directory / target).rename(directory / name)
+            except OSError:
+                pass
+        return directory
+
+    if not already_titled:
+        with RETITLE_LOCK:
+            target = _title_directory(directory.parent, title)
+            try:
+                directory = directory.rename(target)
+            except OSError:
+                return directory
+    rewrite_manifest_paths(directory, planned)
+    return directory
+
+
+def _title_directory(parent: Path, title: str) -> Path:
+    """Return the first free ``parent/<title>`` name (``(2)``, ``(3)``…)."""
+    candidate = parent / title
+    counter = 2
+    while candidate.exists():
+        candidate = parent / f"{title} ({counter})"
+        counter += 1
+    return candidate
 
 
 def assign_directories(collections: list[dict[str, Any]]) -> list[str]:
@@ -270,7 +497,7 @@ def sync_items(
         item["url"] = url
         item["platform"] = platform
         item["last_seen_at"] = discovered_at
-        directory = output_dir / item_id
+        directory = item_directory(item, output_dir, item_id)
         if valid_download(directory):
             item.update({
                 "status": "completed",
@@ -326,14 +553,14 @@ def sync_items(
         item["attempts"] = int(item.get("attempts", 0)) + 1
         item["last_attempt_at"] = now_iso()
 
-    def record(item_id: str, ok: bool, detail: str) -> None:
+    def record(item_id: str, ok: bool, detail: str, directory: Path) -> None:
         nonlocal completed_count, failed_count
         item = items[item_id]
         if ok:
             completed_count += 1
             item.update({
                 "status": "completed",
-                "output_dir": str(output_dir / item_id),
+                "output_dir": str(directory),
                 "completed_at": now_iso(),
             })
             item.pop("error", None)
@@ -355,34 +582,46 @@ def sync_items(
             flush=True,
         )
 
+    def finish(directory: Path) -> Path:
+        """Give a finished item its title-based name, when it has a title."""
+        if not valid_download(directory):
+            return directory
+        return retitle_item(directory)
+
     if jobs <= 1:
         for _platform, item_id, url in pending:
             prepare(item_id)
+            landing = item_directory(items[item_id], output_dir, item_id)
             ok, detail = download_fn(
-                downloader, url, output_dir / item_id, cookies, cookies_from_browser
+                downloader, url, landing, cookies, cookies_from_browser
             )
-            record(item_id, ok, detail)
+            if ok:
+                landing = finish(landing)
+            record(item_id, ok, detail, landing)
     else:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             futures = {}
             for _platform, item_id, url in pending:
                 prepare(item_id)
+                landing = item_directory(items[item_id], output_dir, item_id)
                 future = pool.submit(
                     download_fn,
                     downloader,
                     url,
-                    output_dir / item_id,
+                    landing,
                     cookies,
                     cookies_from_browser,
                 )
-                futures[future] = item_id
+                futures[future] = (item_id, url, landing)
             for future in as_completed(futures):
-                item_id = futures[future]
+                item_id, url, landing = futures[future]
                 try:
                     ok, detail = future.result()
                 except Exception as exc:  # a worker must never kill the run
                     ok, detail = False, f"unexpected download error: {exc}"
-                record(item_id, ok, detail)
+                if ok:
+                    landing = finish(landing)
+                record(item_id, ok, detail, landing)
 
     # Keep the last run's shape on disk: it explains a slow or failed pass
     # without having to re-read the console output.

@@ -34,6 +34,18 @@ Strategy selection:
   `yt-dlp` exposes only a cover image. The item is marked `failed` with an
   explicit reason rather than being saved as a cover.
 
+Naming: every downloader writes `<item id>_<title>.<n>.<ext>` into
+`<output>/<item id>`, which is what keeps a retry reproducible. `sync_common`
+then renames the folder to `<title>` and the files to `<title>.<n>.<ext>` (a
+numbered sequence is renumbered from 1; a duplicate title becomes `<title> (2)`)
+and writes `"file_names": "title"` into the manifest. The title is byte-limited
+to 120 UTF-8 bytes and cut at a word boundary because a Chinese title costs
+three bytes per character. `scripts/retitle_items.py --root <tree>` applies the
+same rename to a tree that was synced earlier and repoints its
+`sync-state.json`; items without a real title — Instagram only reports
+`Video by <user>` — keep their shortcode directory. Run `clean_images.py`
+*before* retitling: pairing previews needs the thumbnail ids in the old names.
+
 None of these platforms expose an enumerable favorites feed to `yt-dlp`.
 
 Preferred path (all three platforms): reuse the logged-in browser through CDP

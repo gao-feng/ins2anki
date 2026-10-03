@@ -267,6 +267,26 @@ class CleanImagesTest(unittest.TestCase):
         self.assertEqual(summary["files_removed"], 0)
         self.assertEqual(summary["items_changed"], 0)
 
+    def test_an_item_renamed_after_its_title_is_left_alone(self):
+        # Retitling renumbers the images, so the numbers are no longer the
+        # thumbnail ids this pairing needs; guessing would delete a real image.
+        (self.item / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "kind": "images",
+                    "file_names": "title",
+                    "media": [str(self.item / "显微镜.1.jpg")],
+                }
+            ),
+            encoding="utf-8",
+        )
+        for index in range(5):
+            (self.item / f"显微镜.{index + 1}.jpg").write_bytes(b"x" * 100)
+        summary = CLEAN.clean(self.root, delete=True)
+        self.assertEqual(summary["items_skipped_title_named"], 1)
+        self.assertEqual(summary["files_removed"], 0)
+        self.assertEqual(len(list(self.item.glob("显微镜.*.jpg"))), 5)
+
     def test_an_item_without_info_json_is_left_alone(self):
         lonely = self.root / "收藏" / "no-info"
         lonely.mkdir()

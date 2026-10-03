@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from download_media import collect_media, partition_image_files  # noqa: E402
+import sync_common  # noqa: E402
 
 
 #: Where the previews go when they are not deleted outright.
@@ -106,6 +107,7 @@ def clean(
         "dry_run": dry_run,
         "items_scanned": 0,
         "items_changed": 0,
+        "items_skipped_title_named": 0,
         "manifests_rewritten": 0,
         "files_removed": 0,
         "bytes_removed": 0,
@@ -113,6 +115,12 @@ def clean(
     }
     for directory in item_dirs(root):
         summary["items_scanned"] += 1
+        if sync_common.is_title_named(directory):
+            # Files renamed after the title carry sequence numbers, not the
+            # thumbnail ids this pairing needs, so guessing here could delete a
+            # real image. Only the downloader can pair those, and it already did.
+            summary["items_skipped_title_named"] += 1
+            continue
         try:
             _keep, previews = partition_image_files(directory, thumbnails_of(directory))
         except OSError as exc:
