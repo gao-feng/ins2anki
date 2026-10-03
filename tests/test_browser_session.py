@@ -1479,6 +1479,15 @@ class BrowserIntegrationTest(unittest.TestCase):
         self.assertEqual(payload["username"], "demo_user")
         self.assertEqual(payload["collections"], 1)
 
+    def test_probe_says_safe_when_a_collection_feed_answers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, _err = self.run_cli([
+                "probe", *self.session_argv(), "--output-root", tmp,
+            ])
+        self.assertEqual(code, 0)
+        self.assertIn("可以同步", out)
+        self.assertIn("自然", out)
+
     def test_collections_lists_names_and_ids(self):
         code, out, _err = self.run_cli(["collections", *self.session_argv()])
         self.assertEqual(code, 0)

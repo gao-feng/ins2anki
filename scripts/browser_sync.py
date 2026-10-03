@@ -601,6 +601,73 @@ def find_cover_only(root: Path) -> list[dict]:
     return findings
 
 
+def command_probe(args: argparse.Namespace) -> int:
+    """Say whether it is safe to run the sync launcher right now.
+
+    A rate-limited session answers navigations with an error page and the
+    page-query returns nothing, so a sync started too early downloads the
+    few items the global feed offers into collections they do not belong
+    to. The probe walks one page of the smallest collection — no downloads
+    — and answers the only question that matters: safe to double-click?
+    """
+    try:
+        with sync_common.SyncLock("instagram"):
+            return _probe(args)
+    except sync_common.SyncBusyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+
+
+def _probe(args: argparse.Namespace) -> int:
+    try:
+        with InstagramSession(
+            endpoint=args.endpoint, timeout=args.timeout, origin=args.origin
+        ) as session:
+            try:
+                who = session.whoami()
+            except (SessionError, cdp.CdpError):
+                who = {}
+            args.username = args.username or who.get("username") or ""
+            try:
+                collections, _source = list_collections(session, args, Path(args.output_root))
+            except (SessionError, cdp.CdpError) as exc:
+                print(f"✗ 拿不到收藏夹列表（{exc}），现在不能同步")
+                return 1
+            if not collections:
+                print("✗ 拿不到收藏夹列表，现在不能同步")
+                return 1
+            smallest = min(collections, key=lambda c: int(c.get("count") or 0))
+            url = str(smallest.get("url") or "") or browser_session.collection_url(
+                str(smallest.get("id") or ""), username=args.username, origin=args.origin
+            )
+            try:
+                payload = session.collection_feed(
+                    url,
+                    collection_id=str(smallest.get("id") or "") or None,
+                    max_items=30,
+                    page_size=12,
+                    delay_ms=args.delay_ms,
+                )
+            except (SessionError, cdp.CdpError) as exc:
+                print(f"✗ 收藏夹「{smallest.get('name')}」打不开（{exc}），现在不能同步")
+                return 1
+            items = browser_session.project_items(payload.get("items") or [])
+            if items:
+                print(
+                    f"✓ 可以同步了：收藏夹「{smallest.get('name')}」第 1 页拿到 "
+                    f"{len(items)} 条，双击「同步Instagram收藏.command」即可"
+                )
+                return 0
+            print(
+                f"✗ 仍被封锁：收藏夹「{smallest.get('name')}」一条都枚举不到，"
+                "过几个小时再查"
+            )
+            return 1
+    except (SessionError, cdp.CdpError) as exc:
+        print(f"✗ 浏览器连不上（{exc}）：先打开专用浏览器再检查")
+        return 2
+
+
 def command_repair(args: argparse.Namespace) -> int:
     """Tidy an output tree: unplayable files, leftover partials, backups."""
     if getattr(args, "clean", False):
@@ -1157,6 +1224,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="where the sync state lives (retired-route hints are read from here)",
     )
     check.set_defaults(func=command_check)
+
+    probe = subparsers.add_parser(
+        "probe", help="say whether Instagram will serve a collection feed right now"
+    )
+    add_session_arguments(probe)
+    add_capture_arguments(probe)
+    probe.add_argument("--delay-ms", type=int, default=400)
+    probe.add_argument(
+        "--output-root", type=Path, default=Path("instagram-saved"),
+        help="where the sync state lives (retired-route hints are read from here)",
+    )
+    probe.set_defaults(func=command_probe)
 
     launch = subparsers.add_parser("launch", help="start the dedicated debug browser")
     launch.add_argument("--browser")
