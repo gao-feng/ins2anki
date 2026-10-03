@@ -733,6 +733,7 @@ class MediaSelectionTest(unittest.TestCase):
     def test_a_photo_never_needs_enrichment(self):
         self.assertFalse(BROWSER_SESSION.video_part_missing(self.item(media_type=1, video_url="")))
 
+
     def test_a_carousel_video_child_without_a_url_needs_enrichment(self):
         item = self.item(
             media_type=8,
@@ -751,6 +752,60 @@ class MediaSelectionTest(unittest.TestCase):
             {"code": "DNoMedia", "pk": "9", "video_url": "", "image_url": ""},
         ]
         self.assertEqual([item["code"] for item in BROWSER_SESSION.project_items(raw)], ["DAbc123"])
+
+
+class VideoVersionSelectionTest(unittest.TestCase):
+    """A video_version list must be narrowed to what QuickTime can decode."""
+
+    @staticmethod
+    def version(url: str, width: int, codec: str | None = None) -> dict:
+        entry = {"url": url, "width": width}
+        if codec is not None:
+            entry["type"] = f'video/mp4; codecs="{codec}"'
+        return entry
+
+    def test_avc_wins_even_when_vp9_is_wider(self):
+        entry = BROWSER_SESSION._pick_playable([
+            self.version("https://cdn/vp9.mp4", 1080, "vp09.00.31.08"),
+            self.version("https://cdn/avc.mp4", 720, "avc1.64001F"),
+        ])
+        self.assertEqual((entry or {}).get("url"), "https://cdn/avc.mp4")
+
+    def test_widest_avc_wins_among_avc(self):
+        entry = BROWSER_SESSION._pick_playable([
+            self.version("https://cdn/small.mp4", 480, "avc1.42E01E"),
+            self.version("https://cdn/big.mp4", 1080, "avc1.64001F"),
+        ])
+        self.assertEqual((entry or {}).get("url"), "https://cdn/big.mp4")
+
+    def test_unmarked_entries_rank_between_avc_and_vp9(self):
+        self.assertEqual(
+            (BROWSER_SESSION._pick_playable([
+                self.version("https://cdn/vp9.mp4", 1080, "vp09.00.31.08"),
+                self.version("https://cdn/plain.mp4", 720),
+            ]) or {}).get("url"),
+            "https://cdn/plain.mp4",
+        )
+        self.assertEqual(
+            (BROWSER_SESSION._pick_playable([
+                self.version("https://cdn/avc.mp4", 480, "avc1.64001F"),
+                self.version("https://cdn/plain.mp4", 1080),
+            ]) or {}).get("url"),
+            "https://cdn/avc.mp4",
+        )
+
+    def test_vp9_as_the_only_option_still_downloads(self):
+        entry = BROWSER_SESSION._pick_playable([
+            self.version("https://cdn/only.mp4", 1080, "vp09.00.31.08"),
+        ])
+        self.assertEqual((entry or {}).get("url"), "https://cdn/only.mp4")
+
+    def test_hevc_counts_as_playable(self):
+        entry = BROWSER_SESSION._pick_playable([
+            self.version("https://cdn/vp9.mp4", 1080, "vp09.00.31.08"),
+            self.version("https://cdn/hevc.mp4", 720, "hvc1.2.4.L153"),
+        ])
+        self.assertEqual((entry or {}).get("url"), "https://cdn/hevc.mp4")
 
 
 class FileNamingTest(unittest.TestCase):

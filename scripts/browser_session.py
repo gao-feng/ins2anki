@@ -202,10 +202,30 @@ globalThis.__ins2anki = (() => {
     }
     return winner ? winner.entry : null;
   };
+  // QuickTime decodes H.264/HEVC only: the widest video_version is sometimes
+  // a VP9 or AV1 stream that downloads fine but will not open. Rank entries
+  // avc/hevc first, unmarked second, vp09/av01 last, then take the widest.
+  const codecTier = (entry) => {
+    const type = String(entry && (entry.type || entry.mime_type) || "");
+    if (/(avc1|hvc1|hev1)/i.test(type)) return 0;
+    if (/(vp09|vp9|av01)/i.test(type)) return 2;
+    return 1;
+  };
+  const bestVideo = (list) => {
+    let winner = null;
+    for (const entry of list || []) {
+      const rank = codecTier(entry);
+      const width = Number((entry.width || entry.config_width || 0), 10) || 0;
+      if (!winner || rank < winner.rank || (rank === winner.rank && width > winner.width)) {
+        winner = { rank, width, entry };
+      }
+    }
+    return winner ? winner.entry : null;
+  };
   const project = (media) => {
     if (!media) return null;
     const videos = media.video_versions || [];
-    const video = best(videos, (entry) => entry.width || entry.config_width);
+    const video = bestVideo(videos);
     const candidates =
       (media.image_versions2 && media.image_versions2.candidates) ||
       media.display_resources ||
@@ -1289,6 +1309,46 @@ def find_page_info(payload: Any) -> dict:
 MEDIA_MARKERS = ("video_versions", "image_versions2", "carousel_media", "carousel_media_edits")
 
 
+_PLAYABLE_CODEC_RE = re.compile(r"(avc1|hvc1|hev1)", re.IGNORECASE)
+_UNPLAYABLE_CODEC_RE = re.compile(r"(vp09|vp9|av01)", re.IGNORECASE)
+
+
+def _codec_tier(entry: dict) -> int:
+    """0 for H.264/HEVC, 1 for unmarked, 2 for VP9/AV1."""
+    marker = str(entry.get("type") or entry.get("mime_type") or "")
+    if _PLAYABLE_CODEC_RE.search(marker):
+        return 0
+    if _UNPLAYABLE_CODEC_RE.search(marker):
+        return 2
+    return 1
+
+
+def _pick_playable(entries: Any) -> dict | None:
+    """Pick the widest video version QuickTime can actually decode.
+
+    Instagram lists several ``video_versions`` and the widest is sometimes a
+    VP9 or AV1 stream: it downloads fine and then refuses to open in
+    QuickTime Player, Photos and Quick Look. Prefer avc1/hevc entries, then
+    unmarked ones, and only fall back to VP9/AV1 when nothing else exists.
+    """
+    winner: tuple[int, int, dict] | None = None
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        rank = _codec_tier(entry)
+        width = 0
+        for key in ("width", "config_width", "max_width"):
+            try:
+                width = int(entry.get(key) or 0)
+            except (TypeError, ValueError):
+                width = 0
+            if width:
+                break
+        if winner is None or rank < winner[0] or (rank == winner[0] and width > winner[1]):
+            winner = (rank, width, entry)
+    return winner[2] if winner else None
+
+
 def _pick_widest(entries: Any) -> dict | None:
     winner: tuple[int, dict] | None = None
     for entry in entries or []:
@@ -1322,7 +1382,7 @@ def project_media(media: Any) -> dict | None:
     code = media.get("code") or media.get("shortcode") or ""
     if not pk and not code:
         return None
-    video = _pick_widest(media.get("video_versions"))
+    video = _pick_playable(media.get("video_versions"))
     image = _pick_widest(
         (media.get("image_versions2") or {}).get("candidates")
         or media.get("display_resources")
