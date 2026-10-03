@@ -569,38 +569,35 @@ def find_cover_only(root: Path) -> list[dict]:
     so before the downloader learned to ask ``/api/v1/media/<pk>/info/`` for
     the full media those items completed as a lone JPEG. The manifest still
     records ``media_type`` 2 while the directory holds no video at all.
+
+    The tree on disk is the source of truth, not the sync state: an interrupted
+    run leaves entries without a status, and two concurrent runs can shrink a
+    state file, while the cover JPEGs stay exactly where they are.
     """
     root = Path(root)
     findings: list[dict] = []
-    for state_file in sorted(root.glob("*/sync-state.json")):
+    for manifest_path in sorted(root.glob("*/*/manifest.json")):
+        directory = manifest_path.parent
+        if directory.name.endswith(BACKUP_SUFFIX):
+            continue
         try:
-            state = json.loads(state_file.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        for item_id, item in (state.get("items") or {}).items():
-            if not isinstance(item, dict) or item.get("status") != "completed":
-                continue
-            directory = Path(str(item.get("output_dir") or state_file.parent / str(item_id)))
-            if not directory.is_dir():
-                continue
-            try:
-                manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            metadata = (manifest.get("metadata") or [{}])[0]
-            if metadata.get("media_type") != 2:
-                continue
-            if any(
-                path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
-                for path in directory.iterdir()
-            ):
-                continue
-            findings.append({
-                "collection": state_file.parent.name,
-                "id": str(item_id),
-                "directory": str(directory),
-                "state_file": str(state_file),
-            })
+        metadata = (manifest.get("metadata") or [{}])[0]
+        if metadata.get("media_type") != 2:
+            continue
+        if any(
+            path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+            for path in directory.iterdir()
+        ):
+            continue
+        findings.append({
+            "collection": directory.parent.name,
+            "id": directory.name,
+            "directory": str(directory),
+            "state_file": str(directory.parent / "sync-state.json"),
+        })
     return findings
 
 

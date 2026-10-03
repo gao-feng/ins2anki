@@ -1243,6 +1243,83 @@ class SessionDownloaderTest(unittest.TestCase):
         patched.assert_called_once()
 
 
+class CoverRepairTest(unittest.TestCase):
+    """Reels saved as their cover must be findable from the tree alone."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "instagram-saved"
+        self.addCleanup(self._tmp.cleanup)
+
+    def write_item(
+        self, collection: str, shortcode: str, media_type: int, files: tuple[str, ...]
+    ) -> Path:
+        directory = self.root / collection / shortcode
+        directory.mkdir(parents=True)
+        for name in files:
+            (directory / name).write_bytes(b"data")
+        (directory / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "platform": "instagram",
+                    "kind": "images" if media_type == 1 else "video",
+                    "media": [str(directory / name) for name in files],
+                    "metadata": [{"id": shortcode, "media_type": media_type}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return directory
+
+    def test_the_tree_is_the_source_of_truth_not_the_state(self):
+        cover = self.write_item("擦边", "DAbc123", 2, ("DAbc123_user.jpg",))
+        self.write_item("擦边", "DVideo01", 2, ("DVideo01_user.mp4",))
+        self.write_item("自然", "DPhoto01", 1, ("DPhoto01_user.jpg",))
+        # an interrupted run parks its originals next to the fresh download
+        self.write_item(
+            "擦边", "DAbc123.unplayable", 2, ("DAbc123_user.jpg",)
+        )
+        # a state file with no entries at all: two concurrent runs, or one
+        # that was killed before any item was recorded
+        (self.root / "擦边").mkdir(parents=True, exist_ok=True)
+        (self.root / "擦边" / "sync-state.json").write_text(
+            json.dumps({"version": 1, "items": {}}), encoding="utf-8"
+        )
+
+        findings = BROWSER_SYNC.find_cover_only(self.root)
+        self.assertEqual([finding["id"] for finding in findings], ["DAbc123"])
+        self.assertEqual(findings[0]["directory"], str(cover))
+        self.assertEqual(
+            findings[0]["state_file"], str(self.root / "擦边" / "sync-state.json")
+        )
+
+    def test_forget_parks_the_cover_and_drops_the_state_entry(self):
+        self.write_item("擦边", "DAbc123", 2, ("DAbc123_user.jpg",))
+        state_file = self.root / "擦边" / "sync-state.json"
+        state_file.write_text(
+            json.dumps(
+                {"version": 1, "items": {"DAbc123": {"url": "https://x/", "status": "completed"}}}
+            ),
+            encoding="utf-8",
+        )
+
+        with redirect_stdout(StringIO()) as out:
+            code = BROWSER_SYNC.command_repair(
+                argparse.Namespace(
+                    output_root=self.root, covers=True, forget=True
+                )
+            )
+        self.assertEqual(code, 0)
+        summary = json.loads(out.getvalue())
+        self.assertEqual(summary["forgotten"], 1)
+        self.assertFalse((self.root / "擦边" / "DAbc123").exists())
+        self.assertTrue(
+            (self.root / "擦边" / "DAbc123.unplayable" / "DAbc123_user.jpg").is_file()
+        )
+        # the entry is gone, so the next sync downloads it again
+        self.assertEqual(json.loads(state_file.read_text(encoding="utf-8"))["items"], {})
+
+
 class CliTest(unittest.TestCase):
     def test_subcommands_exist(self):
         parser = BROWSER_SYNC.build_parser()
