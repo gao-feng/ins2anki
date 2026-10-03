@@ -308,7 +308,7 @@ python3 scripts/favorites_sync.py diagnose --platform xiaohongshu
    | Platform | Page |
    | --- | --- |
    | Xiaohongshu | `https://www.xiaohongshu.com/user/profile/<uid>` → **收藏** |
-   | Douyin | `https://www.douyin.com/user/self?showTab=collection` |
+   | Douyin | `https://www.douyin.com/user/self?showTab=favorite_collection` |
    | Instagram | `https://www.instagram.com/<user>/saved/<collection-id>/` |
 
 2. 打开浏览器控制台，粘贴 [export_collection.js](scripts/browser/export_collection.js)。

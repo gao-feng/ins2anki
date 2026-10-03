@@ -7,7 +7,7 @@
  * collection is open.
  *
  *   Xiaohongshu : https://www.xiaohongshu.com/user/profile/<uid>  -> 收藏 tab
- *   Douyin      : https://www.douyin.com/user/self?showTab=collection
+ *   Douyin      : https://www.douyin.com/user/self?showTab=favorite_collection
  *   Instagram   : https://www.instagram.com/<user>/saved/<collection-id>/
  *
  * Optional, set before running to name the collection explicitly:

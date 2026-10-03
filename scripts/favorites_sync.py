@@ -52,7 +52,10 @@ XHS_ORIGIN = "https://www.xiaohongshu.com"
 XHS_FAVORITES_URL = f"{XHS_ORIGIN}/explore"
 XHS_NOTE_URL = f"{XHS_ORIGIN}/explore/{{note_id}}"
 DOUYIN_ORIGIN = "https://www.douyin.com"
-DOUYIN_FAVORITES_URL = f"{DOUYIN_ORIGIN}/user/self?showTab=collection"
+#: ``showTab=favorite_collection`` (not ``collection``): the shorter value is
+#: silently ignored and the page falls back to the 作品 tab, whose API the
+#: hook happily captures as if it were favorites.
+DOUYIN_FAVORITES_URL = f"{DOUYIN_ORIGIN}/user/self?showTab=favorite_collection"
 
 #: Session-scoped store the injected hook writes to. ``sessionStorage`` survives
 #: the SPA's internal navigations, which is what lets one harvest span folders.
