@@ -259,6 +259,7 @@ def enumerate_items(
                 collection_id=collection_id or None,
                 max_items=args.max_items,
                 delay_ms=args.delay_ms,
+                log=log,
             )
         except (SessionError, cdp.CdpError) as exc:
             problems.append(f"page query: {exc}")
@@ -337,6 +338,7 @@ def make_session_downloader(
     prefer_ytdlp: bool = False,
     allow_ytdlp_fallback: bool = True,
     stats: dict[str, int] | None = None,
+    session: "InstagramSession | None" = None,
 ) -> sync_common.DownloadFn:
     """Build a ``download_fn`` that streams signed CDN URLs itself.
 
@@ -345,6 +347,9 @@ def make_session_downloader(
     coexist in one sync run. Every item is counted in ``stats`` so a slow run
     can be explained instead of guessed at: yt-dlp needs a full extractor pass
     per post, the session path is a plain authenticated HTTP GET.
+
+    ``session`` lets the downloader ask Instagram for a reel's full
+    description when the listing only carried its cover image.
     """
     counters = stats if stats is not None else {}
 
@@ -385,6 +390,20 @@ def make_session_downloader(
             return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "--prefer-yt-dlp")
         if item is None:
             return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "no API payload")
+        if session is not None and browser_session.video_part_missing(item):
+            pk = str(item.get("pk") or "")
+            if not pk:
+                return use_ytdlp(
+                    downloader, url, output_dir, cookies, cookies_from_browser, "video part without a pk"
+                )
+            try:
+                item = session.media_info(pk)
+            except (SessionError, cdp.CdpError) as exc:
+                return use_ytdlp(
+                    downloader, url, output_dir, cookies, cookies_from_browser,
+                    f"media info failed: {str(exc)[:200]}",
+                )
+            media_by_url[url] = item
         plan = browser_session.item_media(item)
         if not plan:
             return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "no media in payload")
@@ -822,6 +841,7 @@ def run_sync(
     state_file: Path | None,
     args: argparse.Namespace,
     source_label: str,
+    session: "InstagramSession | None" = None,
 ) -> tuple[int, dict]:
     """Sync one collection's items and return ``(exit_code, summary)``."""
     media_by_url = {browser_session.item_page_url(item): item for item in items}
@@ -837,6 +857,8 @@ def run_sync(
                 part["kind"] == "video"
                 for part in browser_session.item_media(media_by_url[entry[2]])
             )
+            # a reel the listing described by its cover only is still a video
+            or browser_session.video_part_missing(media_by_url[entry[2]])
         ]
     output_dir = Path(output_dir).expanduser()
     if state_file is None:
@@ -853,6 +875,7 @@ def run_sync(
             prefer_ytdlp=args.prefer_yt_dlp,
             allow_ytdlp_fallback=not args.no_yt_dlp_fallback,
             stats=stats,
+            session=session,
         ),
         source_label=source_label,
         retry_failed=not args.no_retry_failed,
@@ -903,6 +926,7 @@ def command_sync(args: argparse.Namespace) -> int:
                 source_label=browser_session.collection_url(
                     str(collection.get("id") or ""), username=args.username, origin=args.origin
                 ),
+                session=session,
             )
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return code
@@ -979,6 +1003,7 @@ def command_sync(args: argparse.Namespace) -> int:
                 source_label=browser_session.collection_url(
                     str(collection.get("id") or ""), username=args.username, origin=args.origin
                 ),
+                session=session,
             )
             totals["downloaded"] += int(summary.get("downloaded", 0))
             totals["failed"] += int(summary.get("failed", 0))

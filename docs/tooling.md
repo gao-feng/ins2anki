@@ -55,7 +55,10 @@ Preferred path (all three platforms): reuse the logged-in browser through CDP
 instead of exporting cookies. `scripts/browser_sync.py launch` opens a dedicated
 profile once, `check` verifies the session, and `sync --all-collections`
 enumerates, downloads the signed CDN URLs directly, and writes the same layout
-as the yt-dlp path. No cookies, no Keychain prompts, no agent.
+as the yt-dlp path. No cookies, no Keychain prompts, no agent. Instagram's
+saved/collection listings describe a reel by its cover image only, so the
+downloader asks `/api/v1/media/<pk>/info/` for the reel's direct URL before
+streaming; items the API refuses go through the yt-dlp fallback.
 
 `scripts/favorites_sync.py` does the same for 小红书 and 抖音 收藏, which have no
 enumerable feed at all: it installs a harvest hook with

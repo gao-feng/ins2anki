@@ -32,6 +32,7 @@ import random
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -335,6 +336,19 @@ _JS_SAVED_ALL_ITEMS = """
 })()
 """
 
+_JS_MEDIA_INFO = """
+(async () => {
+  const pk = %(pk)s;
+  await __ins2anki.sleep(%(delay_ms)s);
+  const payload = await __ins2anki.getJson(`/api/v1/media/${encodeURIComponent(pk)}/info/`);
+  if (payload.status === "fail") {
+    throw new Error(`Instagram refused media ${pk}: ${payload.message || "unknown"}`);
+  }
+  const media = (payload.items || [])[0] || null;
+  return media ? __ins2anki.project(media) : null;
+})()
+"""
+
 _JS_DOM_LINKS = """
 (async () => {
   const rounds = %(rounds)s;
@@ -516,6 +530,19 @@ def item_shortcode(item: dict) -> str:
         return code
     pk = str(item.get("pk") or "").strip()
     return pk_to_shortcode(pk) if pk else ""
+
+
+def video_part_missing(item: dict) -> bool:
+    """Whether the payload describes a video part without a direct URL.
+
+    The saved and collection listings describe a reel by its cover image only:
+    ``media_type`` 2 with no ``video_url``. Those items need their full
+    description asked for before anything can be streamed.
+    """
+    for part in (item.get("children") or [item]):
+        if part.get("media_type") == 2 and not str(part.get("video_url") or ""):
+            return True
+    return False
 
 
 def item_media(item: dict) -> list[dict[str, str]]:
@@ -738,6 +765,9 @@ class InstagramSession:
         self.reuse_tab = reuse_tab
         self.target: dict | None = None
         self.session: cdp.CdpSession | None = None
+        # download workers share this session, and one CDP socket cannot carry
+        # two interleaved commands: message ids and their replies would cross
+        self._evaluate_lock = threading.Lock()
 
     # -- lifecycle -------------------------------------------------------
 
@@ -776,7 +806,8 @@ class InstagramSession:
     def evaluate(self, expression: str, timeout: float | None = None) -> Any:
         if self.session is None:
             raise SessionError("session is not connected")
-        return self.session.evaluate(expression, timeout=timeout or self.timeout)
+        with self._evaluate_lock:
+            return self.session.evaluate(expression, timeout=timeout or self.timeout)
 
     def origin_ready(self) -> bool:
         """Make sure the tab is on instagram.com so relative fetches work."""
@@ -831,6 +862,25 @@ class InstagramSession:
         payload = self.evaluate(script, timeout=timeout or max(self.timeout, 600.0))
         if not isinstance(payload, dict):
             raise SessionError("unexpected saved-items response from the page")
+        return payload
+
+    def media_info(
+        self, pk: str, delay_ms: int = 250, timeout: float | None = None
+    ) -> dict:
+        """Fetch one media's full description straight from Instagram's API.
+
+        The listing endpoints describe a reel by its cover image only, so the
+        direct video URL has to be asked for per post before it can be
+        streamed. Returns the same projected shape the listings produce.
+        """
+        self.origin_ready()
+        script = js_prelude() + _JS_MEDIA_INFO % {
+            "pk": json.dumps(str(pk)),
+            "delay_ms": int(delay_ms),
+        }
+        payload = self.evaluate(script, timeout=timeout or max(self.timeout, 60.0))
+        if not isinstance(payload, dict) or not payload.get("pk"):
+            raise SessionError(f"no media info for {pk}")
         return payload
 
     def perf_urls(self, timeout: float | None = None) -> list[str]:
@@ -924,6 +974,7 @@ class InstagramSession:
         page_size: int = 50,
         delay_ms: int = 150,
         settle: float = 2.0,
+        log=None,
     ) -> dict:
         """Enumerate a saved collection by replaying its own feed query.
 
@@ -952,6 +1003,10 @@ class InstagramSession:
             seen: set[str] = set()
             cursor: str | None = None
             pages = 0
+            # Pagination is silent otherwise: a 20-page collection replays
+            # one query per page with nothing printed between them, which is
+            # indistinguishable from a hang from the terminal watching it.
+            emit = log or (lambda _message: None)
             while len(items) < max_items:
                 variables["after"] = cursor
                 body = swap_form_field(
@@ -961,6 +1016,7 @@ class InstagramSession:
                 )
                 payload = self.replay(request, body=body)
                 pages += 1
+                emit(f"page {pages}: {len(items)} item(s) so far")
                 page_items = extract_media([payload])
                 fresh = [
                     item

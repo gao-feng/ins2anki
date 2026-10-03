@@ -724,6 +724,25 @@ class MediaSelectionTest(unittest.TestCase):
     def test_post_without_media_is_empty(self):
         self.assertEqual(BROWSER_SESSION.item_media(self.item(video_url="", image_url="")), [])
 
+    def test_a_reel_described_by_its_cover_only_needs_enrichment(self):
+        self.assertTrue(BROWSER_SESSION.video_part_missing(self.item(media_type=2, video_url="")))
+
+    def test_a_reel_with_a_direct_url_is_left_alone(self):
+        self.assertFalse(BROWSER_SESSION.video_part_missing(self.item(media_type=2)))
+
+    def test_a_photo_never_needs_enrichment(self):
+        self.assertFalse(BROWSER_SESSION.video_part_missing(self.item(media_type=1, video_url="")))
+
+    def test_a_carousel_video_child_without_a_url_needs_enrichment(self):
+        item = self.item(
+            media_type=8,
+            children=[
+                self.item(pk="1", code="A", media_type=1, video_url=""),
+                self.item(pk="2", code="B", media_type=2, video_url=""),
+            ],
+        )
+        self.assertTrue(BROWSER_SESSION.video_part_missing(item))
+
     def test_project_items_drops_empty_and_duplicates(self):
         raw = [
             self.item(),
@@ -1137,6 +1156,68 @@ class SessionDownloaderTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fallback disabled", detail)
         patched.assert_not_called()
+
+    def test_a_reel_without_a_direct_url_is_enriched_before_download(self):
+        # the saved/collection listings describe a reel by its cover image only
+        with MockInstagram() as mock_api, tempfile.TemporaryDirectory() as tmp:
+            cover_only = _media_item(
+                mock_api.origin, "3546162228685415517", "DAbc123", "demo_user", 1751500000
+            )
+            cover_only["video_url"] = ""
+            full = _media_item(
+                mock_api.origin, "3546162228685415517", "DAbc123", "demo_user", 1751500000
+            )
+            url = BROWSER_SESSION.item_page_url(cover_only)
+            media_by_url = {url: cover_only}
+            asked: list[str] = []
+
+            class FakeSession:
+                def media_info(self, pk, **_kwargs):
+                    asked.append(pk)
+                    return full
+
+            stats: dict[str, int] = {}
+            download_fn = BROWSER_SYNC.make_session_downloader(
+                media_by_url, stats=stats, session=FakeSession()
+            )
+            ok, detail = download_fn(BROWSER_SYNC.DOWNLOADER, url, Path(tmp) / "out", None, None)
+            self.assertTrue(ok)
+            self.assertEqual(asked, ["3546162228685415517"])
+            self.assertEqual(stats, {"via_session": 1})
+            self.assertTrue((Path(tmp) / "out" / "DAbc123_demo_user.mp4").is_file())
+            # the cache carries the full payload, so a retry streams the video
+            self.assertEqual(media_by_url[url], full)
+
+    def test_a_failed_enrichment_falls_back_to_yt_dlp(self):
+        cover_only = _media_item("https://cdn.test/", "1", "DAbc123", "demo_user", 0)
+        cover_only["video_url"] = ""
+        url = BROWSER_SESSION.item_page_url(cover_only)
+
+        class BrokenSession:
+            def media_info(self, pk, **_kwargs):
+                raise BROWSER_SESSION.SessionError("Instagram refused media 1")
+
+        download_fn = BROWSER_SYNC.make_session_downloader(
+            {url: cover_only}, session=BrokenSession()
+        )
+        with mock.patch.object(
+            SYNC_COMMON, "run_download", return_value=(True, "yt-dlp")
+        ) as patched:
+            ok, _detail = download_fn(BROWSER_SYNC.DOWNLOADER, url, Path("/tmp/x"), None, None)
+        self.assertTrue(ok)
+        patched.assert_called_once()
+
+    def test_without_a_session_a_cover_only_reel_still_saves_its_cover(self):
+        with MockInstagram() as mock_api, tempfile.TemporaryDirectory() as tmp:
+            cover_only = _media_item(mock_api.origin, "1", "DAbc123", "demo_user", 0)
+            cover_only["video_url"] = ""
+            url = BROWSER_SESSION.item_page_url(cover_only)
+            download_fn = BROWSER_SYNC.make_session_downloader({url: cover_only})
+            ok, _detail = download_fn(
+                BROWSER_SYNC.DOWNLOADER, url, Path(tmp) / "out", None, None
+            )
+            self.assertTrue(ok)
+            self.assertTrue((Path(tmp) / "out" / "DAbc123_demo_user.jpg").is_file())
 
     def test_prefer_yt_dlp_delegates_to_the_old_path(self):
         item = _media_item("https://cdn.test/", "1", "DAbc123", "demo_user", 0)
