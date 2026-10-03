@@ -562,6 +562,48 @@ def find_unplayable(root: Path, probe=probe_video_codec) -> list[dict]:
     return findings
 
 
+def find_cover_only(root: Path) -> list[dict]:
+    """List completed downloads that hold a reel's cover where its video belongs.
+
+    The saved and collection listings describe a reel by its cover image only,
+    so before the downloader learned to ask ``/api/v1/media/<pk>/info/`` for
+    the full media those items completed as a lone JPEG. The manifest still
+    records ``media_type`` 2 while the directory holds no video at all.
+    """
+    root = Path(root)
+    findings: list[dict] = []
+    for state_file in sorted(root.glob("*/sync-state.json")):
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for item_id, item in (state.get("items") or {}).items():
+            if not isinstance(item, dict) or item.get("status") != "completed":
+                continue
+            directory = Path(str(item.get("output_dir") or state_file.parent / str(item_id)))
+            if not directory.is_dir():
+                continue
+            try:
+                manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            metadata = (manifest.get("metadata") or [{}])[0]
+            if metadata.get("media_type") != 2:
+                continue
+            if any(
+                path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES
+                for path in directory.iterdir()
+            ):
+                continue
+            findings.append({
+                "collection": state_file.parent.name,
+                "id": str(item_id),
+                "directory": str(directory),
+                "state_file": str(state_file),
+            })
+    return findings
+
+
 def command_repair(args: argparse.Namespace) -> int:
     """Tidy an output tree: unplayable files, leftover partials, backups."""
     if getattr(args, "clean", False):
@@ -570,14 +612,20 @@ def command_repair(args: argparse.Namespace) -> int:
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 2
-    if not shutil.which("ffprobe"):
-        log("note: ffprobe not found; install ffmpeg to detect codecs")
-    findings = find_unplayable(root)
+    covers_mode = bool(getattr(args, "covers", False))
+    if covers_mode:
+        findings = find_cover_only(root)
+    else:
+        if not shutil.which("ffprobe"):
+            log("note: ffprobe not found; install ffmpeg to detect codecs")
+        findings = find_unplayable(root)
     partials = find_partials(root)
     partial_bytes = sum(path.stat().st_size for path in partials)
     by_codec: dict[str, int] = {}
     for finding in findings:
-        by_codec[finding["codec"]] = by_codec.get(finding["codec"], 0) + 1
+        codec = finding.get("codec")
+        if codec:
+            by_codec[codec] = by_codec.get(codec, 0) + 1
 
     if getattr(args, "parts", False) and partials:
         removed = 0
@@ -593,10 +641,11 @@ def command_repair(args: argparse.Namespace) -> int:
                 log(f"could not remove {resolved}: {exc}")
         log(f"removed {removed} partial file(s), {partial_bytes / 1048576:.1f} MiB")
 
+    count_key = "cover_only" if covers_mode else "unplayable"
     if not findings:
         print(json.dumps({
             "root": str(root),
-            "unplayable": 0,
+            count_key: 0,
             "partial_files": len(partials),
             "partial_mib": round(partial_bytes / 1048576, 1),
             "kept": "run with --parts to delete partial files",
@@ -605,14 +654,17 @@ def command_repair(args: argparse.Namespace) -> int:
     if not args.forget:
         print(json.dumps({
             "root": str(root),
-            "unplayable": len(findings),
+            count_key: len(findings),
             "by_codec": by_codec,
             "partial_files": len(partials),
             "partial_mib": round(partial_bytes / 1048576, 1),
             "items": sorted({finding["id"] for finding in findings}),
             "next": [
                 "rerun with --forget to drop these items from the sync state",
-                "then sync again: the browser session fetches Instagram's H.264 version",
+                "then sync again: "
+                + ("the reel's video URL is asked for directly"
+                   if covers_mode else
+                   "the browser session fetches Instagram's H.264 version"),
             ],
         }, ensure_ascii=False, indent=2))
         return 0
@@ -657,7 +709,9 @@ def command_repair(args: argparse.Namespace) -> int:
         "parked": parked,
         "by_codec": by_codec,
         "next": [
-            "run sync again: these items will be fetched as H.264",
+            "run sync again: these items will be fetched as "
+            + ("videos (their cover was saved before the reel fix)"
+               if covers_mode else "H.264"),
             f"originals were renamed with a {BACKUP_SUFFIX} suffix, not deleted",
             f"delete them once you are happy: repair --output-root {root} --clean",
         ],
@@ -1121,6 +1175,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--forget",
         action="store_true",
         help="drop those items from the sync state and park their files for re-download",
+    )
+    repair.add_argument(
+        "--covers",
+        action="store_true",
+        help="find reels saved as their cover image (a video with no video file), "
+             "then forget and re-sync them",
     )
     repair.add_argument(
         "--parts",

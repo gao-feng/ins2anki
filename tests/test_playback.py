@@ -191,6 +191,63 @@ class RepairTest(unittest.TestCase):
             self.assertEqual(sorted(state["items"]), ["Dh264", "Dpending"])
             self.assertEqual(state["items"]["Dh264"]["status"], "completed")
 
+    def test_covers_mode_finds_reports_and_forgets_cover_only_reels(self):
+        """--covers targets reels whose download predates the reel-video fix."""
+
+        def seed(root: Path) -> None:
+            state_file = root / "wtf" / "sync-state.json"
+            state_file.parent.mkdir(parents=True)
+            payload = {"source": "https://www.instagram.com/demo/saved/_/wtf/", "items": {}}
+            for item_id, media_type, files, status in (
+                ("Dcover", 2, ["Dcover_demo.jpg"], "completed"),
+                ("Dfixed", 2, ["Dfixed_demo.jpg", "Dfixed_demo.mp4"], "completed"),
+                ("Dphoto", 1, ["Dphoto_demo.jpg"], "completed"),
+                ("Dhalf", 2, ["Dhalf_demo.jpg"], None),
+            ):
+                directory = state_file.parent / item_id
+                directory.mkdir()
+                for name in files:
+                    (directory / name).write_bytes(b"\x00" * 16)
+                (directory / "manifest.json").write_text(json.dumps({
+                    "metadata": [{"media_type": media_type}],
+                }), encoding="utf-8")
+                payload["items"][item_id] = {
+                    "status": status,
+                    "output_dir": str(directory),
+                }
+            state_file.write_text(json.dumps(payload), encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "instagram-saved"
+            seed(root)
+            self.assertEqual(
+                [(f["collection"], f["id"]) for f in BROWSER_SYNC.find_cover_only(root)],
+                [("wtf", "Dcover")],
+            )
+            # report mode changes nothing
+            args = argparse.Namespace(output_root=root, covers=True, forget=False)
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(BROWSER_SYNC.command_repair(args), 0)
+            report = json.loads(out.getvalue())
+            self.assertEqual(report["cover_only"], 1)
+            self.assertEqual(report["items"], ["Dcover"])
+            self.assertTrue((root / "wtf" / "Dcover" / "Dcover_demo.jpg").is_file())
+            # forget parks the cover and drops the state entry
+            args = argparse.Namespace(output_root=root, covers=True, forget=True)
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(BROWSER_SYNC.command_repair(args), 0)
+            report = json.loads(out.getvalue())
+            self.assertEqual(report["forgotten"], 1)
+            self.assertFalse((root / "wtf" / "Dcover").exists())
+            self.assertEqual(
+                (root / "wtf" / "Dcover.unplayable" / "Dcover_demo.jpg").read_bytes(),
+                b"\x00" * 16,
+            )
+            state = json.loads((root / "wtf" / "sync-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(state["items"]), ["Dfixed", "Dhalf", "Dphoto"])
+
     def test_clean_keeps_originals_until_a_playable_replacement_exists(self):
         """The destructive step must never outrun the re-download."""
         with tempfile.TemporaryDirectory() as tmp:
