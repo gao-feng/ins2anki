@@ -166,9 +166,11 @@ def enumerate_items(
     """Return ``(items, source)``, trying every route from fast to safest.
 
     * ``api`` — the page replays Instagram's REST feed; items carry signed URLs.
+    * ``page-query`` — the page's own saved-feed GraphQL query is replayed with
+      its ``variables`` swapped and paginated by cursor. This is the route that
+      matches what the app itself does, so it survives REST retirements.
     * ``browser-network`` — the page is scrolled and the JSON it fetches for
-      itself is read off CDP; also yields signed URLs, and keeps working when
-      the REST route is retired.
+      itself is read off CDP.
     * ``dom`` — only post links are harvested; media falls back to yt-dlp.
     """
     collection_id = str(collection.get("id") or "")
@@ -192,6 +194,28 @@ def enumerate_items(
             if items:
                 log(f"api: {len(items)} item(s) over {payload.get('pages')} page(s)")
                 return items, "api"
+
+    if args.capture and not getattr(args, "no_replay", False):
+        try:
+            payload = session.collection_feed(
+                url,
+                collection_id=collection_id or None,
+                max_items=args.max_items,
+                delay_ms=args.delay_ms,
+            )
+        except (SessionError, cdp.CdpError) as exc:
+            problems.append(f"page query: {exc}")
+        else:
+            items = browser_session.project_items(payload.get("items") or [])
+            if items:
+                log(
+                    f"page-query: {len(items)} item(s) over {payload.get('pages')} "
+                    f"page(s) via {payload.get('query') or 'the page query'}"
+                )
+                return items, "page-query"
+            problems.append(
+                "page query: the page did not fetch a saved-collection feed"
+            )
 
     if args.capture:
         try:

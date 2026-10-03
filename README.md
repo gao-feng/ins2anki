@@ -170,16 +170,18 @@ Instagram 的 CDN 经常在传输中途掐断连接（`SSL: UNEXPECTED_EOF_WHILE
 
 #### 如果 Instagram 改了接口
 
-`/api/v1/collections/list/` 这类 REST 路径随时可能被下线（现在就会返回 **404 + SPA 外壳**）。
-工具会自动降级到**读取页面自己发出的请求**：让收藏页自己加载，再从 CDP 的 `Network` 域读它拿到的
-JSON（REST 或 GraphQL 都行），所以接口改名不影响使用。日志里会看到：
+`/api/v1/collections/list/` 这类 REST 路径随时可能被下线（现在就会返回 **404 + SPA 外壳**），
+所以默认的枚举路径根本不猜接口：打开收藏页，让**页面自己**发出那条 GraphQL 查询，然后把它原样重放，
+只把 `variables` 里的游标换掉来翻页。这个请求体里有 Instagram 一起校验的 `doc_id`、`fb_dtsg`、`lsd`
+和 `fb_api_req_friendly_name`，手工重建会被回答一个 SPA 外壳，因此重放的是页面自己的字节。日志长这样：
 
 ```
 note: page JavaScript failed: Error: HTTP 404 for /api/v1/collections/list/: <!DOCTYPE html>...
 reading the collections the saved page loads for itself ...
-capture: 3 item(s) from 2 response(s) the page fetched
+page-query: 115 item(s) over 10 page(s) via PolarisSavedCollectionPageWWWQuery
 ```
 
+完整顺序是 **页面查询重放 → 滚动抓取（`--no-replay` 跳过第一条）→ `--dom-fallback` 抓帖子链接（媒体走 yt-dlp）**。
 需要排查时用 `diagnose`，它会列出页面**实际**请求了哪些 API 路径、抓到几个响应、能解析出多少条目：
 
 ```bash

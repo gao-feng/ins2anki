@@ -395,8 +395,8 @@ _JS_SCROLL = """
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   const collections = {};
-  for (const anchor of document.querySelectorAll('a[href*="/saved/_/"]')) {
-    const match = String(anchor.getAttribute("href") || "").match(/\\/saved\\/_\\/(\\d+)/);
+  for (const anchor of document.querySelectorAll('a[href*="/saved/"]')) {
+    const match = String(anchor.getAttribute("href") || "").match(/\\/saved\\/(?:[^/?#]+\\/)?(\\d+)/);
     const name = String(anchor.textContent || "").trim();
     if (match && name) collections[match[1]] = name;
   }
@@ -837,6 +837,152 @@ class InstagramSession:
         payload = self.evaluate(_JS_PERF_URLS, timeout=timeout or self.timeout)
         return [str(value) for value in (payload or [])]
 
+    def navigate(self, url: str, timeout: float | None = None) -> None:
+        """Point the tab at ``url`` and wait for the document to be ready."""
+        if self.session is None:
+            raise SessionError("session is not connected")
+        self.session.navigate(url, timeout=timeout or self.timeout)
+
+    # -- replaying the page's own API calls ------------------------------
+
+    def replay(
+        self,
+        request: dict,
+        body: str | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Re-issue one of the page's own requests from inside the page.
+
+        Cookies and CSRF state come from the page itself, so nothing is ever
+        exported. The captured headers are replayed verbatim except for the
+        ones a ``fetch`` must set itself.
+        """
+        if self.session is None:
+            raise SessionError("session is not connected")
+        url = str(request.get("url") or "")
+        if not url.startswith(self.origin):
+            raise SessionError(f"refusing to replay {url} outside {self.origin}")
+        headers = {
+            str(key): str(value)
+            for key, value in (request.get("headers") or {}).items()
+            if not str(key).startswith(":")
+            and str(key).lower() not in REPLAY_DROPPED_HEADERS
+        }
+        expression = _JS_REPLAY % {
+            "url": json.dumps(url),
+            "method": json.dumps(str(request.get("method") or "GET").upper()),
+            "headers": json.dumps(headers, ensure_ascii=False),
+            "body": json.dumps(body) if body is not None else "null",
+        }
+        result = self.evaluate(expression, timeout=timeout or max(self.timeout, 180.0))
+        if not isinstance(result, dict):
+            raise SessionError("the page did not return a replay result")
+        status = int(result.get("status") or 0)
+        text = strip_graphql_prefix(str(result.get("text") or ""))
+        if status >= 400:
+            raise SessionError(f"replaying {url} answered HTTP {status}")
+        if not text.startswith("{"):
+            raise SessionError(
+                f"replaying {url} answered HTTP {status} without JSON "
+                "(the page needs to be reloaded on the collection)"
+            )
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise SessionError(f"replaying {url} returned invalid JSON") from exc
+
+    def _feed_request(
+        self, capture: "NetworkCapture", collection_id: str | None
+    ) -> dict | None:
+        """Pick the page's own saved-feed query out of its traffic."""
+        candidates = [
+            request
+            for request in capture.requests
+            if request.get("post_data") and "/graphql" in str(request.get("url") or "")
+        ]
+        if collection_id:
+            for request in reversed(candidates):
+                decoded = urllib.parse.unquote(str(request.get("post_data") or ""))
+                if f'"collection_id":"{collection_id}"' in decoded:
+                    return request
+            return None
+        # no id (the whole saved list): prefer a saved-feed friendly name
+        for request in reversed(candidates):
+            decoded = urllib.parse.unquote(str(request.get("post_data") or ""))
+            if "collection_id" not in decoded and "Saved" in decoded:
+                return request
+        return candidates[-1] if candidates else None
+
+    def collection_feed(
+        self,
+        url: str,
+        collection_id: str | None = None,
+        max_items: int = 5000,
+        page_size: int = 50,
+        delay_ms: int = 150,
+        settle: float = 2.0,
+    ) -> dict:
+        """Enumerate a saved collection by replaying its own feed query.
+
+        Deterministic and complete: the page's query is replayed with only its
+        ``variables`` swapped, then paginated by ``page_info.end_cursor``.
+        """
+        if self.session is None:
+            raise SessionError("session is not connected")
+        capture = NetworkCapture(self.session)
+        capture.start()
+        try:
+            self.navigate(url)
+            deadline = time.monotonic() + max(settle, 1.0)
+            while time.monotonic() < deadline:
+                time.sleep(0.4)
+                capture.drain()
+            request = self._feed_request(capture, collection_id or None)
+            if not request:
+                return {"items": [], "pages": 0, "request": None, "query": ""}
+            form = urllib.parse.parse_qs(str(request.get("post_data") or ""))
+            raw_variables = (form.get("variables") or ["{}"])[0]
+            variables = json.loads(raw_variables)
+            query = (form.get("fb_api_req_friendly_name") or [""])[0]
+            variables["first"] = max(1, int(page_size))
+            items: list[dict] = []
+            seen: set[str] = set()
+            cursor: str | None = None
+            pages = 0
+            while len(items) < max_items:
+                variables["after"] = cursor
+                body = swap_form_field(
+                    str(request.get("post_data") or ""),
+                    "variables",
+                    json.dumps(variables),
+                )
+                payload = self.replay(request, body=body)
+                pages += 1
+                page_items = extract_media([payload])
+                fresh = [
+                    item
+                    for item in page_items
+                    if item_shortcode(item) and item_shortcode(item) not in seen
+                ]
+                seen.update(
+                    code for code in (item_shortcode(item) for item in page_items) if code
+                )
+                items.extend(fresh)
+                info = find_page_info(payload)
+                cursor = info.get("end_cursor") or None
+                if not info.get("has_next_page") or not cursor or not fresh:
+                    break
+                if delay_ms:
+                    time.sleep(delay_ms / 1000.0)
+            return {
+                "items": items[:max_items],
+                "pages": pages,
+                "request": request,
+                "query": query,
+            }
+        finally:
+            capture.stop()
+
     def capture_page(
         self,
         url: str,
@@ -1014,6 +1160,73 @@ def match_collection(collections: list[dict], query: str) -> dict:
     )
 
 
+#: A body is retried across this many drains before being abandoned. CDP does
+#: not retain every response body (Instagram streams some of them), so the
+#: replay path below does not depend on this at all — it only feeds the
+#: scroll-and-capture fallback.
+BODY_ATTEMPTS = 8
+
+#: Instagram answers some GraphQL endpoints with an anti-JSON-hijacking prefix.
+GRAPHQL_PREFIXES = ("for (;;);", "for(;;);", "while(1);")
+
+#: Headers a page-side ``fetch`` must let the browser set for itself.
+REPLAY_DROPPED_HEADERS = frozenset(
+    {
+        "content-length", "host", "connection", "accept-encoding", "accept-language",
+        "cookie", "origin", "referer", "user-agent", "priority",
+        "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "sec-fetch-user",
+    }
+)
+
+_JS_REPLAY = """
+(async () => {
+  const response = await fetch(%(url)s, {
+    method: %(method)s,
+    headers: %(headers)s,
+    body: %(body)s,
+    credentials: "include",
+  });
+  return {status: response.status, text: await response.text()};
+})()
+"""
+
+
+def strip_graphql_prefix(text: str) -> str:
+    """Drop Instagram's anti-JSON-hijacking prefix, if present."""
+    stripped = (text or "").lstrip()
+    for prefix in GRAPHQL_PREFIXES:
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].lstrip()
+    return stripped
+
+
+def swap_form_field(post_data: str, field: str, value: str) -> str:
+    """Replace one field of an urlencoded body, leaving every other byte alone.
+
+    Rebuilding a GraphQL POST from scratch does not work: Instagram validates
+    ``fb_dtsg``, ``lsd`` and ``fb_api_req_friendly_name`` together with the
+    ``doc_id`` and answers a hand-rolled body with the SPA shell. Only the
+    ``variables`` field may change.
+    """
+    encoded = f"{field}={urllib.parse.quote(value, safe='')}"
+    parts = (post_data or "").split("&")
+    replaced = False
+    for index, part in enumerate(parts):
+        if part.startswith(f"{field}="):
+            parts[index] = encoded
+            replaced = True
+    if not replaced:
+        parts.append(encoded)
+    return "&".join(part for part in parts if part)
+
+
+def find_page_info(payload: Any) -> dict:
+    """Return the first GraphQL ``page_info`` object in a payload."""
+    for node in _walk(payload):
+        if isinstance(node, dict) and "has_next_page" in node:
+            return node
+    return {}
+
 MEDIA_MARKERS = ("video_versions", "image_versions2", "carousel_media", "carousel_media_edits")
 
 
@@ -1177,7 +1390,14 @@ class NetworkCapture:
         self.patterns = tuple(patterns)
         self.payloads: list[Any] = []
         self.urls: list[str] = []
+        #: raw request descriptors (url/method/headers/post_data) for the API
+        #: calls the page made; the replay path needs the exact body
+        self.requests: list[dict] = []
         self._pending: dict[str, str] = {}
+        #: how many drains a pending body may survive before it is given up on
+        self._attempts: dict[str, int] = {}
+        #: request ids whose response body is known to be complete
+        self._finished: set[str] = set()
         self._enabled = False
 
     def start(self) -> None:
@@ -1221,25 +1441,61 @@ class NetworkCapture:
             method = event.get("method")
             params = event.get("params") or {}
             request_id = str(params.get("requestId") or "")
+            if method == "Network.requestWillBeSent":
+                request = params.get("request") or {}
+                url = str(request.get("url") or "")
+                if (
+                    params.get("type") in ("XHR", "Fetch")
+                    and url
+                    and self.interested(url)
+                ):
+                    self.requests.append(
+                        {
+                            "url": url,
+                            "method": str(request.get("method") or "GET"),
+                            "headers": dict(request.get("headers") or {}),
+                            "post_data": request.get("postData") or "",
+                        }
+                    )
+                continue
             if method == "Network.responseReceived":
                 response = params.get("response") or {}
                 url = str(response.get("url") or "")
                 mime = str(response.get("mimeType") or "")
+                # no mime check: Instagram serves JSON as text/javascript, so
+                # requiring "json" silently dropped the collection feed itself
                 if (
                     params.get("type") in ("XHR", "Fetch")
                     and request_id
                     and self.interested(url)
-                    and "json" in mime
                 ):
                     self._pending[request_id] = url
-            elif method in ("Network.loadingFailed", "Network.loadingFinished"):
-                if method == "Network.loadingFailed":
-                    self._pending.pop(request_id, None)
+            elif method == "Network.loadingFailed":
+                self._pending.pop(request_id, None)
+                self._attempts.pop(request_id, None)
+                self._finished.discard(request_id)
+            elif method == "Network.loadingFinished" and request_id in self._pending:
+                # the body is complete now: start its retry budget here rather
+                # than dropping it (which would lose the whole feed response)
+                self._finished.add(request_id)
+                self._attempts[request_id] = 0
         for request_id, url in list(self._pending.items()):
-            body = self._body(request_id)
-            del self._pending[request_id]
-            if not body:
+            count = self._attempts.get(request_id, 0)
+            if request_id in self._finished and count >= BODY_ATTEMPTS:
+                self._pending.pop(request_id, None)
+                self._attempts.pop(request_id, None)
+                self._finished.discard(request_id)
                 continue
+            self._attempts[request_id] = count + 1
+            body = self._body(request_id)
+            if not body:
+                # the response is still streaming: keep it pending and try
+                # again on the next drain instead of dropping a payload that
+                # may be the entire collection feed
+                continue
+            self._pending.pop(request_id, None)
+            self._attempts.pop(request_id, None)
+            self._finished.discard(request_id)
             try:
                 parsed = json.loads(body)
             except (json.JSONDecodeError, TypeError):

@@ -100,9 +100,26 @@ const target = %(collection_id)s;
 const base = target
   ? `/graphql/query/collection-items/?id=${target}`
   : "/graphql/query/saved-items/";
+// the collection feed is a POST to /api/graphql whose body carries doc_id plus
+// a variables blob; Instagram answers with data.fetch__MediaCollection.media
+const feedBody = (after) => new URLSearchParams({
+  doc_id: "29192959536956308",
+  variables: JSON.stringify({after: after, collection_id: target, first: 12}),
+  fb_api_req_friendly_name: "PolarisSavedCollectionPageWWWQuery",
+  lsd: "mock-lsd",
+  fb_dtsg: "mock-dtsg",
+  jazoest: "26149",
+}).toString();
+const nodes = (payload) => {
+  const collection = payload && payload.data && payload.data.fetch__MediaCollection;
+  if (collection && collection.media) {
+    return (collection.media.edges || []).map((edge) => edge.node);
+  }
+  return (payload && payload.data && payload.data.items) || [];
+};
 const render = (data) => {
   const grid = document.getElementById("grid");
-  for (const node of (data && data.data && data.data.items) || []) {
+  for (const node of nodes(data)) {
     const code = node.code || "";
     if (!code) continue;
     const anchor = document.createElement("a");
@@ -119,8 +136,21 @@ const get = async (url) => {
     return null;
   }
 };
+const post = async (url, body) => {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {"content-type": "application/x-www-form-urlencoded"},
+      body: body,
+    });
+    return response.ok ? await response.json() : null;
+  } catch (error) {
+    return null;
+  }
+};
+const feedPage = (after) => post("/api/graphql", feedBody(after));
 (async () => {
-  const first = await get(base);
+  const first = await feedPage(null);
   if (first) {
     render(first);
     window.__ins2ankiLoadedFirstPage = true;
@@ -132,7 +162,9 @@ const get = async (url) => {
   const onScroll = async () => {
     if (page >= 2) return;
     page += 1;
-    const next = await get(`${base}${base.includes("?") ? "&" : "?"}page=${page}`);
+    const next = await feedPage(first && first.data && first.data.fetch__MediaCollection
+      && first.data.fetch__MediaCollection.media
+      && first.data.fetch__MediaCollection.media.page_info.end_cursor);
     if (next) render(next);
     window.removeEventListener("scroll", onScroll);
   };
@@ -187,6 +219,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             "next_max_id": "",
             "status": "ok",
         }
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        parsed = urllib.parse.urlsplit(self.path)
+        length = int(self.headers.get("content-length") or 0)
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        form = urllib.parse.parse_qs(raw)
+        if parsed.path != "/api/graphql":
+            return self.send_error(404)
+        # a hand-rolled body (no fb_dtsg/lsd) is answered with the SPA shell,
+        # exactly like Instagram does; only the page's own body is accepted
+        if not form.get("fb_dtsg") or not form.get("lsd"):
+            return self.send_spa_shell()
+        variables = json.loads((form.get("variables") or ["{}"])[0])
+        wanted = str(variables.get("collection_id") or "")
+        if wanted and wanted != self.collection_id:
+            return self.send_json({"data": {"fetch__MediaCollection": None}})
+        after = variables.get("after")
+        payload = self.page_two() if after else self.page_one()
+        self.server.media_requests = getattr(self.server, "media_requests", 0) + 1
+        return self.send_json({"data": {"fetch__MediaCollection": {
+            "name": "自然",
+            "media": {
+                "edges": [{"node": item} for item in payload["items"]],
+                "page_info": {
+                    "has_next_page": bool(payload["more_available"]),
+                    "end_cursor": payload["next_max_id"] or None,
+                },
+            },
+        }}})
 
     def do_GET(self):  # noqa: N802 - http.server API
         parsed = urllib.parse.urlsplit(self.path)
@@ -377,6 +438,148 @@ class MockInstagram:
 # --------------------------------------------------------------------------
 # Pure helpers
 # --------------------------------------------------------------------------
+
+
+class ReplayHelperTest(unittest.TestCase):
+    """The page's GraphQL body must be replayed byte-for-byte."""
+
+    def test_swap_form_field_replaces_only_variables(self):
+        original = (
+            "av=17841400143213132&__d=www&__user=0&__a=1"
+            "&fb_api_req_friendly_name=PolarisSavedCollectionPageWWWQuery"
+            "&fb_dtsg=NAfyPMYiW6vHQ9tPHbAQdMEH9-9_3yKA0BQvTlvKuC7KryL4lIgsGxA%3A17843683195144578%3A1791008573"
+            "&jazoest=26149&lsd=bRcTLk8tT3R4CWhuv6e-wk"
+            "&doc_id=29192959536956308&server_timestamps=true"
+            "&variables=%7B%22after%22%3Anull%2C%22collection_id%22%3A%2218243648742304045%22%2C%22first%22%3A12%7D"
+        )
+        swapped = BROWSER_SESSION.swap_form_field(
+            original, "variables", json.dumps({"after": "CURSOR1", "collection_id": "18243648742304045", "first": 12})
+        )
+        # every other parameter survives untouched, in order
+        self.assertEqual(swapped.split("&")[:-1], original.split("&")[:-1])
+        self.assertTrue(swapped.endswith(
+            "variables=%7B%22after%22%3A%20%22CURSOR1%22%2C%20%22collection_id%22%3A%20%2218243648742304045%22%2C%20%22first%22%3A%2012%7D"
+        ))
+        # and Instagram still sees a valid variables blob
+        parsed = urllib.parse.parse_qs(swapped)
+        self.assertEqual(json.loads(parsed["variables"][0])["after"], "CURSOR1")
+
+    def test_swap_form_field_appends_when_missing(self):
+        self.assertIn("x=1", BROWSER_SESSION.swap_form_field("x=1", "variables", "{}"))
+        self.assertEqual(
+            urllib.parse.parse_qs(BROWSER_SESSION.swap_form_field("", "variables", '{"a": 1}'))["variables"],
+            ['{"a": 1}'],
+        )
+
+    def test_strip_graphql_prefix(self):
+        self.assertEqual(BROWSER_SESSION.strip_graphql_prefix('{"data": 1}'), '{"data": 1}')
+        self.assertEqual(BROWSER_SESSION.strip_graphql_prefix('for (;;);{"data": 1}'), '{"data": 1}')
+        self.assertEqual(BROWSER_SESSION.strip_graphql_prefix('  while(1);{"data": 1}'), '{"data": 1}')
+        self.assertEqual(BROWSER_SESSION.strip_graphql_prefix(""), "")
+
+    def test_find_page_info_locates_the_cursor(self):
+        payload = {"data": {"fetch__MediaCollection": {"media": {
+            "edges": [],
+            "page_info": {"has_next_page": True, "end_cursor": "CURSOR9"},
+        }}}}
+        info = BROWSER_SESSION.find_page_info(payload)
+        self.assertTrue(info["has_next_page"])
+        self.assertEqual(info["end_cursor"], "CURSOR9")
+        self.assertEqual(BROWSER_SESSION.find_page_info({"data": {}}), {})
+
+    def test_extract_media_reads_the_fetch_media_collection_envelope(self):
+        payload = {"data": {"fetch__MediaCollection": {"name": "fun", "media": {
+            "edges": [
+                {"node": _media_item("https://x/", "1", "DAbc123", "demo_user", 1751500000)},
+                {"node": _media_item("https://x/", "2", "DDef456", "demo_user", 1751500001, kind="image")},
+            ],
+            "page_info": {"has_next_page": True, "end_cursor": "C1"},
+        }}}}
+        items = BROWSER_SESSION.extract_media([payload])
+        self.assertEqual(sorted(item["code"] for item in items), ["DAbc123", "DDef456"])
+
+
+class _FakeSession:
+    """A CdpSession stand-in that replays scripted events and body failures."""
+
+    def __init__(self, events, body_results):
+        self._events = list(events)
+        self._bodies = list(body_results)
+        self.calls = 0
+
+    def drain_events(self):
+        drained, self._events = self._events, []
+        return drained
+
+    def call(self, method, params=None, timeout=None):
+        self.calls += 1
+        value = self._bodies.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class NetworkCaptureTest(unittest.TestCase):
+    def _response_event(self, request_id, mime="application/json"):
+        return {
+            "method": "Network.responseReceived",
+            "params": {
+                "requestId": request_id,
+                "type": "XHR",
+                "response": {
+                    "url": "https://www.instagram.com/api/graphql",
+                    "mimeType": mime,
+                },
+            },
+        }
+
+    def test_text_javascript_responses_are_captured(self):
+        """Instagram serves its JSON as text/javascript; requiring a json mime
+        silently dropped the collection feed itself."""
+        events = [
+            self._response_event("r1", mime="text/javascript"),
+            {"method": "Network.loadingFinished", "params": {"requestId": "r1"}},
+        ]
+        session = _FakeSession(events, [{"body": '{"data": {"ok": 1}}'}])
+        capture = BROWSER_SESSION.NetworkCapture(session)
+        capture.drain()
+        self.assertEqual(capture.payloads, [{"data": {"ok": 1}}])
+
+    def test_bodies_are_retried_until_the_response_is_complete(self):
+        error = BROWSER_SESSION.cdp.CdpError("No resource with given identifier found")
+        events = [self._response_event("r1")]
+        session = _FakeSession(events, [error])
+        capture = BROWSER_SESSION.NetworkCapture(session)
+        capture.drain()
+        # the body was not available yet: the request must stay pending
+        self.assertEqual(capture.payloads, [])
+        session._events = [{"method": "Network.loadingFinished", "params": {"requestId": "r1"}}]
+        session._bodies = [error, {"body": '{"data": {"page": 1}}'}]
+        capture.drain()
+        capture.drain()
+        self.assertEqual(capture.payloads, [{"data": {"page": 1}}])
+
+    def test_requests_are_recorded_with_their_exact_bodies(self):
+        events = [{
+            "method": "Network.requestWillBeSent",
+            "params": {
+                "requestId": "r1",
+                "type": "Fetch",
+                "request": {
+                    "url": "https://www.instagram.com/api/graphql",
+                    "method": "POST",
+                    "headers": {"content-type": "application/x-www-form-urlencoded", "x-ig-app-id": "936619743392459"},
+                    "postData": "doc_id=29192959536956308&variables=%7B%7D",
+                },
+            },
+        }]
+        capture = BROWSER_SESSION.NetworkCapture(_FakeSession(events, []))
+        capture.drain()
+        self.assertEqual(len(capture.requests), 1)
+        request = capture.requests[0]
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(request["post_data"], "doc_id=29192959536956308&variables=%7B%7D")
+        self.assertEqual(request["headers"]["x-ig-app-id"], "936619743392459")
 
 
 class ShortcodeTest(unittest.TestCase):
