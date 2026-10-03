@@ -2,7 +2,36 @@
 
 ## Download prerequisites
 
-Install `yt-dlp` using the platform's supported package mechanism. Instagram changes frequently; use a current release. The downloader accepts a Netscape cookies file via `--cookies` when the user authorizes access to content visible in their logged-in session.
+Install `yt-dlp` using the platform's supported package mechanism. These
+platforms change frequently; use a current release. The downloader accepts a
+Netscape cookies file via `--cookies` when the user authorizes access to content
+visible in their logged-in session.
+
+## Supported platforms
+
+`scripts/download_media.py` probes each item before downloading, so it never
+mistakes a video cover for the item's content:
+
+| Platform | Accepted URLs | Notes |
+| --- | --- | --- |
+| `instagram` | `/p/<code>`, `/reel/<code>`, `/tv/<code>` | Saved collections can be enumerated with `--collection-url`. |
+| `xiaohongshu` | `/explore/<note_id>`, `/discovery/item/<note_id>`, `xhslink.com` short links | `xsec_token` is required for most notes and is preserved on normalization. Cookies are effectively mandatory. |
+| `douyin` | `/video/<id>`, `/note/<id>`, `v.douyin.com` short links | Needs fresh cookies (`s_v_web_id`); `yt-dlp` reports "Fresh cookies (not necessarily logged in) are needed" otherwise. |
+
+Strategy selection:
+
+- **video** — the probe finds real formats; download with
+  `--write-info-json --write-description --write-thumbnail`.
+- **images** — Xiaohongshu only: no video formats but a populated `imageList`;
+  download every image with `--write-all-thumbnails`.
+- **unsupported** — everything else, including Douyin image notes, where
+  `yt-dlp` exposes only a cover image. The item is marked `failed` with an
+  explicit reason rather than being saved as a cover.
+
+None of these platforms expose an enumerable favorites feed to `yt-dlp`. Use
+`scripts/browser/export_collection.js` on the logged-in 收藏 page to produce an
+inventory, then feed it to `sync_saved.py --urls-file` or
+`sync_collections.py --inventory`.
 
 ## Local transcription
 

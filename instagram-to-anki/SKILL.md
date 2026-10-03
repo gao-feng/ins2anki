@@ -1,41 +1,62 @@
 ---
 name: instagram-to-anki
-description: Download or incrementally mirror authorized Instagram posts and saved collections, transcribe spoken English, identify contextually challenging vocabulary, confirm selections, and save approved material as Anki notes through AnkiConnect. Use for Instagram collection sync, local media mirroring, English study, vocabulary extraction, or Anki import.
+description: Download or incrementally mirror authorized Instagram posts and saved collections, Xiaohongshu (小红书) notes, and Douyin (抖音) videos and favorites (收藏夹), transcribe spoken English, identify contextually challenging vocabulary, confirm selections, and save approved material as Anki notes through AnkiConnect. Use for Instagram/Xiaohongshu/Douyin collection sync, local media mirroring, English study, vocabulary extraction, or Anki import.
 ---
 
-# Instagram to Anki
+# Instagram / Xiaohongshu / Douyin to Anki
 
 Follow the workflow in order. Treat user confirmation as a mandatory commit boundary.
 
+Supported sources: `instagram`, `xiaohongshu`, `douyin`. One shared incremental
+engine handles all three; only the URL shapes and login requirements differ.
+
 ## 1. Collect the source
 
-1. Obtain the Instagram post/reel URL. If the user has not supplied one, ask for it.
-2. Run `scripts/download_instagram.py URL --output-dir DIR`.
-3. If public download fails because login is required, use an available browser session only with the user's authorization and pass a Netscape cookies file with `--cookies`. Never expose or preserve cookies in artifacts.
+1. Obtain the post/reel/note URL. If the user has not supplied one, ask for it.
+2. Run `scripts/download_media.py URL --output-dir DIR`. Use `--platform` only to override detection.
+3. If a download fails because login is required, use an available browser session only with the user's authorization and pass a Netscape cookies file with `--cookies`, or use `--cookies-from-browser BROWSER` so credentials stay in the browser profile. Never expose or preserve cookies in artifacts.
 4. Inspect `manifest.json`. Preserve the original media; do not recompress it unless a downstream tool requires a compatible copy.
 
-Instagram content may be copyrighted or private. Download only content the user is authorized to access. Do not bypass access controls, and do not redistribute the downloaded media.
+Source content may be copyrighted or private. Download only content the user is authorized to access. Do not bypass access controls, and do not redistribute the downloaded media.
 
 ### Incrementally sync a saved collection
 
-When the user asks to mirror an Instagram saved collection locally, run
-`scripts/sync_instagram_saved.py` with either `--collection-url` or
-`--urls-file`, plus `--output-dir`. For a private saved collection, prefer
+When the user asks to mirror a saved collection or 收藏夹 locally, run
+`scripts/sync_saved.py` with `--output-dir` plus either `--urls-file` or, for
+Instagram only, `--collection-url`. For private content, prefer
 `--cookies-from-browser BROWSER` so credentials remain in the browser profile.
 The sync command records `sync-state.json`, validates completed media before
 skipping it, downloads only newly discovered or incomplete posts, and retries
 failed posts on later runs. Use `--dry-run` for discovery without downloads.
 
+`yt-dlp` cannot enumerate Xiaohongshu or Douyin favorites — it only addresses
+single items (`/explore/<id>`, `/video/<id>`). For those platforms, ask the user
+to open the 收藏 page in their logged-in browser, run
+`scripts/browser/export_collection.js` in the console, and pass the exported
+`posts` array via `--urls-file`. The exporter auto-scrolls, preserves
+Xiaohongshu `xsec_token` parameters, and accumulates collections in
+`localStorage` so it can be run once per 收藏夹. Never fabricate a favorites
+list: if the user cannot export one, say so instead of guessing URLs.
+
 Collection sync only downloads authorized source media. It does not imply
 permission to create Anki notes; continue to require the confirmation in step 3
 before importing any synchronized post into Anki.
 
-For all-collection sync, inspect the user's logged-in Instagram Saved UI with the
-available browser tool. Enumerate every collection, scroll each collection until
-no new post links appear, and write a UTF-8 inventory JSON with a `collections`
-array. Each entry must contain `name`, `url`, and a deduplicated `posts` array.
-Then run `scripts/sync_instagram_collections.py --inventory FILE --output-dir
-DIR`, adding the authorized cookie option when downloads require login. The
+Platform limitations to report honestly:
+
+- Douyin image notes (`/note/<id>`) are unsupported: `yt-dlp` exposes only a
+  video cover, which is not the note content. They are marked `failed` with an
+  explicit reason.
+- Xiaohongshu image notes (图文) are supported and downloaded as their full
+  image list.
+
+For all-collection sync, inspect the user's logged-in Saved UI with the
+available browser tool, or have the user run the console exporter. Enumerate
+every collection, scroll each collection until no new post links appear, and
+write a UTF-8 inventory JSON with a `collections` array. Each entry must contain
+`name` and a deduplicated `posts` array, plus an optional `platform` and `url`.
+Then run `scripts/sync_collections.py --inventory FILE --output-dir DIR`,
+adding the authorized cookie option when downloads require login. The
 coordinator creates a safe directory for every collection and maintains a
 separate incremental state inside it. Do not store browser cookies in the
 inventory.
