@@ -220,9 +220,11 @@ class RepairTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "instagram-saved"
             seed(root)
+            # the tree is the source of truth, so the pending Dhalf is found
+            # too: its cover JPEG is on disk and no video beside it
             self.assertEqual(
                 [(f["collection"], f["id"]) for f in BROWSER_SYNC.find_cover_only(root)],
-                [("wtf", "Dcover")],
+                [("wtf", "Dcover"), ("wtf", "Dhalf")],
             )
             # report mode changes nothing
             args = argparse.Namespace(output_root=root, covers=True, forget=False)
@@ -230,8 +232,8 @@ class RepairTest(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertEqual(BROWSER_SYNC.command_repair(args), 0)
             report = json.loads(out.getvalue())
-            self.assertEqual(report["cover_only"], 1)
-            self.assertEqual(report["items"], ["Dcover"])
+            self.assertEqual(report["cover_only"], 2)
+            self.assertEqual(report["items"], ["Dcover", "Dhalf"])
             self.assertTrue((root / "wtf" / "Dcover" / "Dcover_demo.jpg").is_file())
             # forget parks the cover and drops the state entry
             args = argparse.Namespace(output_root=root, covers=True, forget=True)
@@ -239,14 +241,15 @@ class RepairTest(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertEqual(BROWSER_SYNC.command_repair(args), 0)
             report = json.loads(out.getvalue())
-            self.assertEqual(report["forgotten"], 1)
+            self.assertEqual(report["forgotten"], 2)
             self.assertFalse((root / "wtf" / "Dcover").exists())
+            self.assertFalse((root / "wtf" / "Dhalf").exists())
             self.assertEqual(
                 (root / "wtf" / "Dcover.unplayable" / "Dcover_demo.jpg").read_bytes(),
                 b"\x00" * 16,
             )
             state = json.loads((root / "wtf" / "sync-state.json").read_text(encoding="utf-8"))
-            self.assertEqual(sorted(state["items"]), ["Dfixed", "Dhalf", "Dphoto"])
+            self.assertEqual(sorted(state["items"]), ["Dfixed", "Dphoto"])
 
     def test_clean_keeps_originals_until_a_playable_replacement_exists(self):
         """The destructive step must never outrun the re-download."""

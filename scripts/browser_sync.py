@@ -950,6 +950,15 @@ def run_sync(
 
 
 def command_sync(args: argparse.Namespace) -> int:
+    try:
+        with sync_common.SyncLock("instagram"):
+            return _command_sync(args)
+    except sync_common.SyncBusyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+
+
+def _command_sync(args: argparse.Namespace) -> int:
     if not args.collection and not args.all_collections:
         print("error: pass --collection <id|name> or --all-collections", file=sys.stderr)
         return 2

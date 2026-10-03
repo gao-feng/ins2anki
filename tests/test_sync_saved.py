@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,7 @@ PLATFORMS = load("platforms")
 SYNC_SAVED = load("sync_saved")
 DOWNLOAD_MEDIA = load("download_media")
 SYNC_COMMON = load("sync_common")
+FAVORITES = load("favorites_sync")
 
 
 def write_manifest(directory: Path, filenames: tuple[str, ...]) -> None:
@@ -285,6 +287,68 @@ class GenericSyncEngineTests(unittest.TestCase):
                 )
             self.assertEqual(code, 0)
             self.assertEqual(seen, ["https://www.douyin.com/video/6961737553342991651"])
+
+
+class SyncLockTests(unittest.TestCase):
+    """One sync per platform — the double-click guard.
+
+    Two navigators fighting over one browser tab enumerated whatever feed
+    the other's page happened to be fetching, so the sync commands now take
+    a per-platform flock before doing anything else. The kernel releases it
+    when the holder exits, so a crash can never wedge the tool.
+    """
+
+    def test_second_acquire_of_the_same_platform_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = SYNC_COMMON.SyncLock("instagram", directory=Path(tmp))
+            lock.acquire()
+            try:
+                with self.assertRaises(SYNC_COMMON.SyncBusyError) as ctx:
+                    SYNC_COMMON.SyncLock("instagram", directory=Path(tmp)).acquire()
+                self.assertIn("instagram", str(ctx.exception))
+                self.assertIn(str(os.getpid()), str(ctx.exception))
+            finally:
+                lock.release()
+
+    def test_release_lets_the_next_run_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = SYNC_COMMON.SyncLock("douyin", directory=Path(tmp))
+            lock.acquire()
+            lock.release()
+            # acquire again: no SyncBusyError, and usable as a context manager
+            with SYNC_COMMON.SyncLock("douyin", directory=Path(tmp)):
+                pass
+
+    def test_platforms_do_not_block_each_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ig = SYNC_COMMON.SyncLock("instagram", directory=Path(tmp)).acquire()
+            try:
+                xhs = SYNC_COMMON.SyncLock("xiaohongshu", directory=Path(tmp)).acquire()
+                xhs.release()
+            finally:
+                ig.release()
+
+    def test_cli_refuses_before_touching_the_browser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # HOME is patched below, so the CLI's default lock directory
+            # resolves to <tmp>/.ins2anki/locks — hold the lock exactly there
+            holder = SYNC_COMMON.SyncLock(
+                "xiaohongshu", directory=Path(tmp) / ".ins2anki" / "locks"
+            )
+            holder.acquire()
+            try:
+                env = dict(os.environ, HOME=str(tmp))
+                with mock.patch.dict(os.environ, env, clear=True):
+                    out, err = StringIO(), StringIO()
+                    with redirect_stdout(out), redirect_stderr(err):
+                        code = FAVORITES.main([
+                            "sync", "--platform", "xiaohongshu",
+                            "--output-dir", str(Path(tmp) / "out"),
+                        ])
+                self.assertEqual(code, 3)
+                self.assertIn("already running", err.getvalue())
+            finally:
+                holder.release()
 
 
 class ErrorSummaryTests(unittest.TestCase):

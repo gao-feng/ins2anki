@@ -34,7 +34,9 @@ non-empty media file. If the media disappears, the next run marks it
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import subprocess
 import sys
@@ -468,6 +470,89 @@ def summarize_error(detail: str, limit: int = 160) -> str:
         if stripped and stripped not in {"{", "}"}:
             return stripped[:limit]
     return text[:limit]
+
+
+class SyncBusyError(RuntimeError):
+    """Another sync for the same platform is already running."""
+
+
+class SyncLock:
+    """One sync per platform: the shared browser tab cannot serve two.
+
+    Today's collisions came from launchers double-clicked while a sync was
+    already running: two navigators fought over one tab and one state file,
+    and the loser enumerated whatever feed the winner's page happened to be
+    fetching. The lock is an ``flock`` held by the running process and
+    released by the kernel when it exits — crashed or killed included — so
+    there is no stale lock to clean up, ever. Different platforms keep
+    different locks: an Instagram sync and a Xiaohongshu sync drive
+    different tabs and may run side by side.
+    """
+
+    def __init__(self, platform: str, directory: Path | None = None):
+        from pathlib import Path as _Path
+        self.platform = platform
+        self.directory = _Path(directory) if directory else (_Path.home() / ".ins2anki" / "locks")
+        self.path = self.directory / f"{platform}.lock"
+        self._fd: int | None = None
+
+    def acquire(self) -> "SyncLock":
+        self.directory.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            holder = ""
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                raw = os.read(fd, 4096)
+                holder = json.loads(raw.decode("utf-8")) if raw.strip() else {}
+            except (OSError, ValueError):
+                holder = {}
+            os.close(fd)
+            detail = (
+                f" (pid {holder.get('pid')}, started {holder.get('started')})"
+                if holder.get("pid")
+                else ""
+            )
+            raise SyncBusyError(
+                f"another {self.platform} sync is already running{detail}; "
+                "let it finish or stop it before starting a new one"
+            ) from None
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, json.dumps({
+            "platform": self.platform,
+            "pid": os.getpid(),
+            "started": now_iso(),
+        }).encode("utf-8"))
+        # Intentionally left open: the kernel releases the lock when this
+        # process exits, which is the whole point.
+        self._fd = fd
+        return self
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self._fd)
+                self._fd = None
+
+    def __enter__(self) -> "SyncLock":
+        return self.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
+def acquire_sync_lock(platform: str) -> SyncLock:
+    """Take the per-platform sync lock or refuse to run.
+
+    Returns the lock (callers may ignore it — the kernel releases it when
+    the process exits); raises :class:`SyncBusyError` if one is held.
+    """
+    return SyncLock(platform).acquire()
 
 
 def sync_items(

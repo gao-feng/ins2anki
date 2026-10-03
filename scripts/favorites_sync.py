@@ -780,6 +780,15 @@ def command_diagnose(args: argparse.Namespace) -> int:
 
 
 def command_sync(args: argparse.Namespace) -> int:
+    try:
+        with sync_common.SyncLock(str(args.platform)):
+            return _command_sync(args)
+    except sync_common.SyncBusyError as exc:
+        log(f"error: {exc}")
+        return 3
+
+
+def _command_sync(args: argparse.Namespace) -> int:
     with open_session(args) as session:
         url = favorites_url(args, session)
         harvest = session.harvest(
