@@ -5,7 +5,8 @@ The downloader probes the item first, then chooses a strategy:
 
 * **video** — the item exposes real video formats; download them with yt-dlp.
 * **images** — a Xiaohongshu note with no video formats but a populated image
-  list; download every image with ``--write-all-thumbnails``.
+  list; download the images with ``--write-all-thumbnails``, then keep only the
+  full-size variant of each one (the extractor lists a preview beside it).
 
 The probe matters: Douyin's ``thumbnails`` are video *covers*, not note images,
 so treating a cover as the item's content would report a false success. Douyin
@@ -178,6 +179,104 @@ def download_images(
     return completed.returncode, detail
 
 
+# --------------------------------------------------------------------------
+# Xiaohongshu image variants
+# --------------------------------------------------------------------------
+
+#: Xiaohongshu lists every note image twice: the full ``!nd_dft_...`` image and
+#: a ``!nd_prv_...`` preview. Both report the same pixel dimensions, so only the
+#: URL tells them apart — measured over 700 images, the preview is ~5x smaller
+#: (median 21 KB vs 122 KB) at identical width/height.
+_VARIANT_ORDER = ("nd_dft_wlteh", "nd_dft_wgth", "nd_dft", "nd_prv_wlteh", "nd_prv_wgth")
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def image_identity(url: str) -> str:
+    """Return the id shared by every variant of one image, or ``""``."""
+    head = str(url or "").split("!", 1)[0].rstrip("/")
+    return head.rsplit("/", 1)[-1] if head else ""
+
+
+def variant_rank(url: str) -> int:
+    """Rank one variant of an image; the smallest rank is the best copy."""
+    text = str(url or "")
+    suffix = text.split("!", 1)[1] if "!" in text else ""
+    for rank, marker in enumerate(_VARIANT_ORDER):
+        if suffix.startswith(marker):
+            return rank
+    return len(_VARIANT_ORDER)
+
+
+def image_files(out: Path, thumbnail_id: str) -> list[Path]:
+    """Return the files yt-dlp wrote for one thumbnail id.
+
+    ``--write-all-thumbnails`` appends the thumbnail's id to the output
+    template, so ``.<id>.jpg`` identifies the file.
+    """
+    if not thumbnail_id:
+        return []
+    found = [
+        path
+        for path in out.glob(f"*.{thumbnail_id}.*")
+        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+    ]
+    return sorted(found)
+
+
+def partition_image_files(
+    out: Path, thumbnails: list | None
+) -> tuple[list[Path], list[Path]]:
+    """Split downloaded image files into ``(keep, preview)``.
+
+    Every image is a group of thumbnails sharing :func:`image_identity`; the
+    best-ranked variant is kept and the rest are previews. A group whose best
+    file is not on disk is left untouched, and so is any entry this code cannot
+    read, so an unexpected payload never costs a file.
+    """
+    groups: dict[str, list[dict]] = {}
+    for entry in thumbnails or []:
+        if not isinstance(entry, dict):
+            continue
+        identity = image_identity(entry.get("url"))
+        if identity and entry.get("id") not in (None, ""):
+            groups.setdefault(identity, []).append(entry)
+
+    keep: list[Path] = []
+    previews: list[Path] = []
+    for entries in groups.values():
+        chosen = min(
+            entries,
+            key=lambda entry: (
+                variant_rank(entry.get("url")),
+                -int(entry.get("width") or 0),
+                -int(entry.get("height") or 0),
+            ),
+        )
+        best = image_files(out, str(chosen.get("id")))
+        if not best:
+            continue
+        keep.extend(best)
+        for entry in entries:
+            if str(entry.get("id")) == str(chosen.get("id")):
+                continue
+            previews.extend(image_files(out, str(entry.get("id"))))
+    return keep, previews
+
+
+def drop_image_previews(out: Path, thumbnails: list | None) -> list[Path]:
+    """Delete the preview copies saved next to their full-size originals."""
+    _keep, previews = partition_image_files(out, thumbnails)
+    removed: list[Path] = []
+    for path in previews:
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
+
+
 def build_manifest(out: Path, url: str, platform: str, kind: str) -> dict:
     metadata = []
     for path in sorted(out.glob("*.info.json")):
@@ -278,6 +377,11 @@ def run(
         returncode, detail = download_images(
             exe, args.url, out, args.cookies, args.cookies_from_browser
         )
+        if not returncode:
+            # The extractor lists a preview next to every full-size image and
+            # --write-all-thumbnails saves both; keep only the full-size one.
+            for removed in drop_image_previews(out, thumbnails):
+                print(f"removed preview {removed.name}", file=sys.stderr)
     else:
         returncode, detail = download_video(
             exe, args.url, out, args.cookies, args.cookies_from_browser

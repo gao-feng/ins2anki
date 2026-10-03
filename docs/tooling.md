@@ -23,7 +23,13 @@ Strategy selection:
 - **video** — the probe finds real formats; download with
   `--write-info-json --write-description --write-thumbnail`.
 - **images** — Xiaohongshu only: no video formats but a populated `imageList`;
-  download every image with `--write-all-thumbnails`.
+  download the images with `--write-all-thumbnails`, then keep only each image's
+  full-size `!nd_dft_...` file. The extractor lists a `!nd_prv_...` preview
+  beside every image with *identical* `width`/`height`, so the URL variant — not
+  the resolution, and not the file size — is what identifies it (measured over
+  700 images: 21 KB vs 122 KB median). `scripts/clean_images.py --root xhs-saved`
+  applies the same choice to items synced before this, and repoints their
+  manifests.
 - **unsupported** — everything else, including Douyin image notes, where
   `yt-dlp` exposes only a cover image. The item is marked `failed` with an
   explicit reason rather than being saved as a cover.
