@@ -45,6 +45,7 @@ def write_item(
     names: tuple[str, ...],
     note_id: str = NOTE_ID,
     title: str = TITLE,
+    description: str = "",
 ) -> Path:
     """Create a downloaded item exactly as a downloader leaves it."""
     directory = parent / note_id
@@ -66,7 +67,12 @@ def write_item(
                 "kind": "images",
                 "media": media,
                 "metadata": [
-                    {"id": note_id, "title": title, "info_json": info}
+                    {
+                        "id": note_id,
+                        "title": title,
+                        "description": description,
+                        "info_json": info,
+                    }
                 ],
             },
             ensure_ascii=False,
@@ -249,6 +255,37 @@ class RetitleItemTest(unittest.TestCase):
         item = write_item(self.root, ("DG0R_3gRE5T_demo_user.mp4",), title="Video by demo_user")
         self.assertEqual(SYNC_COMMON.retitle_item(item), item)
         self.assertTrue((item / "DG0R_3gRE5T_demo_user.mp4").is_file())
+
+    def test_an_untitled_note_is_named_after_its_first_description_line(self):
+        # yt-dlp reports "XiaoHongShu video #<id>" for a note with no title
+        # field; the feed shows the first line of the description instead.
+        junk = f"XiaoHongShu video #{NOTE_ID}"
+        item = write_item(
+            self.root,
+            (f"{NOTE_ID}_{junk}.0.jpg",),
+            title=junk,
+            description="今天自己做的普通胃镜，全程很顺利。\n\n后半段正文",
+        )
+        target = SYNC_COMMON.retitle_item(item)
+        # NFKC narrows the full-width comma, as it does for every other name
+        self.assertEqual(target.name, "今天自己做的普通胃镜,全程很顺利。")
+        self.assertTrue((target / "今天自己做的普通胃镜,全程很顺利。.1.jpg").is_file())
+
+    def test_an_untitled_note_without_a_description_is_left_alone(self):
+        junk = f"XiaoHongShu video #{NOTE_ID}"
+        item = write_item(self.root, (f"{NOTE_ID}_{junk}.0.jpg",), title=junk)
+        self.assertEqual(SYNC_COMMON.retitle_item(item), item)
+
+    def test_the_instagram_placeholder_ignores_the_description(self):
+        # Instagram keeps its shortcode even when a caption exists, so the
+        # tree stays consistent instead of mixing two naming schemes.
+        item = write_item(
+            self.root,
+            ("DG0R_3gRE5T_demo_user.mp4",),
+            title="Video by demo_user",
+            description="a caption",
+        )
+        self.assertEqual(SYNC_COMMON.retitle_item(item), item)
 
     def test_a_duplicate_title_gets_a_numbered_directory(self):
         first = write_item(self.root, (f"{NOTE_ID}_{TITLE}.0.jpg",))

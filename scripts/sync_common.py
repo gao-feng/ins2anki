@@ -188,7 +188,13 @@ def safe_title(value: str, fallback: str = "", limit: int = 120) -> str:
 
 
 #: yt-dlp's placeholder caption for a post that carries no title of its own.
+#: Instagram reports it for every untitled post, so it is never used as a name.
 PLACEHOLDER_TITLE = re.compile(r"^Video by \S+$")
+
+#: yt-dlp's fallback when a note has no title field at all. Xiaohongshu shows
+#: the first line of the description where a title would be, so that line is
+#: the name to browse by.
+UNTITLED_NOTE = re.compile(r"^\w+ video #\S+$")
 
 
 def manifest_title(directory: Path) -> str:
@@ -199,10 +205,17 @@ def manifest_title(directory: Path) -> str:
         return ""
     metadata = data.get("metadata") if isinstance(data, dict) else None
     for entry in metadata or []:
-        if isinstance(entry, dict):
-            title = str(entry.get("title") or "").strip()
-            if title and not PLACEHOLDER_TITLE.match(title):
-                return title
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        if not title or PLACEHOLDER_TITLE.match(title):
+            continue
+        if not UNTITLED_NOTE.match(title):
+            return title
+        for line in str(entry.get("description") or "").splitlines():
+            line = line.strip()
+            if line:
+                return line
     return ""
 
 

@@ -40,11 +40,14 @@ then renames the folder to `<title>` and the files to `<title>.<n>.<ext>` (a
 numbered sequence is renumbered from 1; a duplicate title becomes `<title> (2)`)
 and writes `"file_names": "title"` into the manifest. The title is byte-limited
 to 120 UTF-8 bytes and cut at a word boundary because a Chinese title costs
-three bytes per character. `scripts/retitle_items.py --root <tree>` applies the
-same rename to a tree that was synced earlier and repoints its
-`sync-state.json`; items without a real title — Instagram only reports
-`Video by <user>` — keep their shortcode directory. Run `clean_images.py`
-*before* retitling: pairing previews needs the thumbnail ids in the old names.
+three bytes per character. A note without a title field of its own — yt-dlp
+reports `XiaoHongShu video #<id>` — is named after the first line of its
+description, which is what the feed shows in place of a title. Items whose
+platform reports no title at all — Instagram only ever reports `Video by
+<user>` — keep their shortcode. `scripts/retitle_items.py --root <tree>` applies
+the same rename to a tree that was synced earlier and repoints its
+`sync-state.json`. Run `clean_images.py` *before* retitling: pairing previews
+needs the thumbnail ids in the old names.
 
 None of these platforms expose an enumerable favorites feed to `yt-dlp`.
 
