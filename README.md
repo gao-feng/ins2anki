@@ -9,36 +9,49 @@ Supported sources: **Instagram** posts/reels and saved collections, **Xiaohongsh
 1. **Collect** — `scripts/download_media.py` fetches the post with `yt-dlp` and writes `manifest.json` (media list + caption + metadata). `scripts/download_instagram.py` is a thin Instagram-pinned wrapper kept for compatibility. Pass `--cookies` / `--cookies-from-browser` for login-gated content only with the user's authorization.
 2. **Transcribe & extract** — Whisper transcribes the audio with timestamps (OCR/caption for images and carousels). Challenging B2–C2 words and fixed expressions are selected with Chinese meanings, IPA, a faithful source excerpt, and a difficulty note.
 3. **Confirm** — a numbered candidate list is presented; the user confirms (1) which words, (2) the meanings, (3) media attachment, and (4) whether to add TTS pronunciation. Nothing is written to Anki until the user replies.
-4. **Save** — `scripts/tts_word.py` generates per-word pronunciation MP3s with local TTS; a UTF-8 `selection.json` is written per `references/selection-schema.md`; then `scripts/anki_import.py` creates the deck, uploads each media file once, and adds Basic notes — word plus optional `[sound:...]` on the front; meaning, context, position, source link, and optional media on the back.
+4. **Save** — `scripts/tts_word.py` generates per-word pronunciation MP3s with local TTS; a UTF-8 `selection.json` is written per `docs/selection-schema.md`; then `scripts/anki_import.py` creates the deck, uploads each media file once, and adds Basic notes — word plus optional `[sound:...]` on the front; meaning, context, position, source link, and optional media on the back.
 5. **Report** — deck, note count, attached media, and any skipped duplicates or failures.
 
 ## Repository layout
 
 ```
-instagram-to-anki/
-  SKILL.md                    # skill definition (workflow the agent follows)
-  agents/openai.yaml          # agent interface metadata
-  scripts/
-    platforms.py              # URL detection/normalization for all 3 platforms
-    sync_common.py            # shared incremental engine + state/validation
-    download_media.py         # multi-platform downloader + manifest writer
-    sync_saved.py             # incremental sync CLI (--platform)
-    sync_collections.py       # multi-collection inventory coordinator
+ins2anki/
+  README.md
+  同步收藏夹.command           # 双击：Instagram 收藏夹 → instagram-saved/
+  同步小红书收藏.command       # 双击：小红书/抖音 收藏 → xhs-saved/ …
+  scripts/                    # everything runnable (stdlib-only, run in place)
+    browser_sync.py           # Instagram sync CLI: check/launch/collections/sync/diagnose/repair
+    browser_session.py        # Instagram CDP session + page-query replay
+    cdp.py                    # dependency-free CDP/WebSocket client
     favorites_sync.py         # one command: 小红书/抖音 收藏 sync via a browser session
+    sync_common.py            # shared incremental engine + state/validation
+    download_media.py         # yt-dlp wrapper (H.264-first so QuickTime plays the result)
+    platforms.py              # URL detection/normalization for all 3 platforms
+    anki_import.py            # AnkiConnect importer (notes + media)
+    tts_word.py               # local TTS pronunciation (Windows SAPI + ffmpeg)
     browser/
       export_collection.js    # console script: export a 收藏夹 to inventory JSON
       harvest_xhs_tokens.js   # console script: harvest note id -> xsec_token
+    sync_saved.py             # inventory-based fallback: single-collection CLI
+    sync_collections.py       # inventory-based fallback: multi-collection coordinator
     download_instagram.py     # thin Instagram wrapper (compatibility)
     sync_instagram_saved.py   # thin Instagram wrapper (compatibility)
-    sync_instagram_collections.py # thin Instagram wrapper (compatibility)
-    tts_word.py               # local TTS pronunciation (Windows SAPI + ffmpeg)
-    anki_import.py            # AnkiConnect importer (notes + media)
-  references/
+    sync_instagram_collections.py  # thin Instagram wrapper (compatibility)
+  docs/
+    SKILL.md                  # skill definition (workflow the agent follows)
+    agents/openai.yaml        # agent interface metadata
     selection-schema.md       # confirmed-selection JSON schema
     tooling.md                # download / transcription / TTS / Anki notes
+  tests/                      # python3 -m unittest discover -s tests
+    test_browser_session.py   # Instagram session + CLI incl. browser integration tests
+    test_favorites_sync.py    # 小红书/抖音 one-command sync
+    test_playback.py          # playability checks + repair
+    test_sync_saved.py        # inventory-based fallback (single collection)
+    test_sync_instagram_saved.py  # compatibility wrappers
 ```
 
-`downloads/` (fetched media, transcripts, `selection.json`) and `__pycache__/` are gitignored — downloaded media is never committed or redistributed.
+Sync output (`instagram-saved/`, `xhs-saved/`, `downloads/`, inventories) and
+`__pycache__/` are gitignored — downloaded media is never committed or redistributed.
 
 ## Prerequisites
 
@@ -78,22 +91,22 @@ The agent runs the workflow, presents candidates, and waits for your confirmatio
 
 这条路不导出、不读取 cookie，因此**不会触发 macOS 钥匙串的"访问机密信息"授权弹窗**：
 登录态留在浏览器里，脚本只让页面自己调用 Instagram 的网页接口，拿到带签名的媒体直链后由
-Python 直接下载（[browser_sync.py](<instagram-to-anki/scripts/browser_sync.py>)）。
+Python 直接下载（[browser_sync.py](<scripts/browser_sync.py>)）。
 整条链路是确定性的，不需要 AI 或 skill 参与。
 
 命令行等价形式：
 
 ```bash
-python3 instagram-to-anki/scripts/browser_sync.py launch   # 一次性：打开专用浏览器并登录
-python3 instagram-to-anki/scripts/browser_sync.py check    # 确认登录状态与收藏夹数量
-python3 instagram-to-anki/scripts/browser_sync.py sync \
+python3 scripts/browser_sync.py launch   # 一次性：打开专用浏览器并登录
+python3 scripts/browser_sync.py check    # 确认登录状态与收藏夹数量
+python3 scripts/browser_sync.py sync \
   --all-collections --output-root instagram-saved
 ```
 
 只同步一个收藏夹：
 
 ```bash
-python3 instagram-to-anki/scripts/browser_sync.py sync \
+python3 scripts/browser_sync.py sync \
   --collection 自然 --output-dir instagram-saved/自然
 ```
 
@@ -126,17 +139,17 @@ yt-dlp 回退路径也已固定为 `--format 'bv*[vcodec^=avc1]+ba[acodec^=mp4a]
 
 ```bash
 # 1) 体检：只报告，不动文件
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved
+python3 scripts/browser_sync.py repair --output-root instagram-saved
 
 # 2) 记为待重下：把条目目录改名为 <短码>.unplayable/ 并从 sync state 移除（不删文件）
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --forget
+python3 scripts/browser_sync.py repair --output-root instagram-saved --forget
 
 # 3) 重新下载（不能跳过！）——双击 同步收藏夹.command，或：
-python3 instagram-to-anki/scripts/browser_sync.py sync --all-collections --launch --output-root instagram-saved
+python3 scripts/browser_sync.py sync --all-collections --launch --output-root instagram-saved
 
 # 4) 确认刷新完成后再删备份（只报告：期望 unplayable: 0）
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --clean
+python3 scripts/browser_sync.py repair --output-root instagram-saved
+python3 scripts/browser_sync.py repair --output-root instagram-saved --clean
 ```
 
 第 2 步**不删除**原文件，只改名，所以原字节一直在磁盘上。第 4 步的 `--clean` 也**只删除已经确认被重下替代的原件**：
@@ -153,9 +166,9 @@ python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram
 
 ```bash
 # 体检：报告不可播放（VP9）条目 + 残留分片
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved
+python3 scripts/browser_sync.py repair --output-root instagram-saved
 # 删除残留分片（回收空间）
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --parts
+python3 scripts/browser_sync.py repair --output-root instagram-saved --parts
 ```
 
 下载器也不会盲信同名 `.part`：如果它比真实资源还长（来自别的工具或别的流），会丢弃重下，
@@ -189,7 +202,7 @@ page-query: 115 item(s) over 10 page(s) via PolarisSavedCollectionPageWWWQuery
 需要排查时用 `diagnose`，它会列出页面**实际**请求了哪些 API 路径、抓到几个响应、能解析出多少条目：
 
 ```bash
-python3 instagram-to-anki/scripts/browser_sync.py diagnose --launch
+python3 scripts/browser_sync.py diagnose --launch
 ```
 
 - `"json_responses": 0`：页面还没加载完，加大 `--scroll-rounds`
@@ -215,7 +228,7 @@ Use the saved collection URL and an already logged-in browser profile. Cookies a
 read directly by `yt-dlp`; the sync state does not store them:
 
 ```bash
-python instagram-to-anki/scripts/sync_saved.py \
+python scripts/sync_saved.py \
   --platform instagram \
   --collection-url 'https://www.instagram.com/USER/saved/_/COLLECTION_ID/' \
   --cookies-from-browser chrome \
@@ -231,7 +244,7 @@ Instagram may temporarily prevent `yt-dlp` from enumerating a saved collection.
 In that case, export one post/reel URL per line and use the same incremental engine:
 
 ```bash
-python instagram-to-anki/scripts/sync_saved.py \
+python scripts/sync_saved.py \
   --urls-file saved-urls.txt \
   --cookies-from-browser chrome \
   --output-dir instagram-saved
@@ -254,9 +267,9 @@ downloading. Do not share cookie files or downloaded private media.
 命令行等价形式：
 
 ```bash
-python3 instagram-to-anki/scripts/favorites_sync.py launch   # 一次性：打开专用浏览器并登录
-python3 instagram-to-anki/scripts/favorites_sync.py check    # 确认登录并看抓到多少条
-python3 instagram-to-anki/scripts/favorites_sync.py sync \
+python3 scripts/favorites_sync.py launch   # 一次性：打开专用浏览器并登录
+python3 scripts/favorites_sync.py check    # 确认登录并看抓到多少条
+python3 scripts/favorites_sync.py sync \
   --platform xiaohongshu --output-dir xhs-saved/收藏 --jobs 4
 ```
 
@@ -265,8 +278,8 @@ python3 instagram-to-anki/scripts/favorites_sync.py sync \
 `diagnose` 打印页面实际调用了哪些接口（一条都抓不到时先看它）。
 
 这条路不导出、不读取 cookie，因此**不会触发 macOS 钥匙串的"访问机密信息"授权弹窗**。
-做法是复用 [browser_sync.py](instagram-to-anki/scripts/browser_sync.py) 那一套浏览器会话：
-在收藏页**加载之前**注入一个抓取钩子（[favorites_sync.py](instagram-to-anki/scripts/favorites_sync.py)），
+做法是复用 [browser_sync.py](scripts/browser_sync.py) 那一套浏览器会话：
+在收藏页**加载之前**注入一个抓取钩子（[favorites_sync.py](scripts/favorites_sync.py)），
 让它自己滚动列表，把页面自己请求到的 JSON 收集起来——小红书笔记的 `xsec_token`、抖音条目的
 视频/图片直链都在里面——再交给共用的增量引擎下载。
 
@@ -277,7 +290,7 @@ python3 instagram-to-anki/scripts/favorites_sync.py sync \
 #### 抓不到东西时
 
 ```bash
-python3 instagram-to-anki/scripts/favorites_sync.py diagnose --platform xiaohongshu
+python3 scripts/favorites_sync.py diagnose --platform xiaohongshu
 ```
 
 - `notes_with_token: 0`：窗口里没登录，或收藏页还没渲染完（加大 `--scroll-rounds`）
@@ -297,16 +310,16 @@ python3 instagram-to-anki/scripts/favorites_sync.py diagnose --platform xiaohong
    | Douyin | `https://www.douyin.com/user/self?showTab=collection` |
    | Instagram | `https://www.instagram.com/<user>/saved/<collection-id>/` |
 
-2. 打开浏览器控制台，粘贴 [export_collection.js](instagram-to-anki/scripts/browser/export_collection.js)。
+2. 打开浏览器控制台，粘贴 [export_collection.js](scripts/browser/export_collection.js)。
    它会自动滚到底、把结果累积进 `localStorage`，然后打印、复制并下载 `favorites-inventory.json`。
    每切一个收藏夹跑一次；想显式命名就先 `window.__FAVORITES_NAME = "英语"`。
-   小红书还要再粘贴一次 [harvest_xhs_tokens.js](instagram-to-anki/scripts/browser/harvest_xhs_tokens.js)
+   小红书还要再粘贴一次 [harvest_xhs_tokens.js](scripts/browser/harvest_xhs_tokens.js)
    补齐 `xsec_token`（收藏页的 `<a href>` 里不带 token）。
 
 3. 用清单下载（`jq -r '.collections[0].posts[]'` 可取出某一份列表）：
 
    ```bash
-   python instagram-to-anki/scripts/sync_saved.py \
+   python scripts/sync_saved.py \
      --urls-file collection-urls.txt \
      --platform xiaohongshu \
      --output-dir xhs-saved/英语
@@ -317,7 +330,7 @@ python3 instagram-to-anki/scripts/favorites_sync.py diagnose --platform xiaohong
 4. 或者一次同步清单里的每个收藏夹（各自一个目录、各自一份增量状态）：
 
    ```bash
-   python instagram-to-anki/scripts/sync_collections.py \
+   python scripts/sync_collections.py \
      --inventory favorites-inventory.json \
      --output-dir saved
    ```
@@ -330,7 +343,7 @@ The local coordinator creates one safe directory per collection and gives every
 directory its own incremental `sync-state.json`:
 
 ```bash
-python instagram-to-anki/scripts/sync_collections.py \
+python scripts/sync_collections.py \
   --inventory collections.json \
   --cookies-from-browser chrome \
   --output-dir instagram-saved

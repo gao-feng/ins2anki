@@ -17,7 +17,7 @@ first runs that path for you:
 One-time setup is a login in the window ``launch`` opens; after that the whole
 sync is::
 
-    python3 instagram-to-anki/scripts/favorites_sync.py sync --platform xiaohongshu \
+    python3 scripts/favorites_sync.py sync --platform xiaohongshu \
         --output-dir xhs-saved/收藏
 
 Why the token matters: Xiaohongshu only renders a note URL that carries a fresh

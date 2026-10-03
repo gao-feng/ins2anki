@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 
-SCRIPTS = Path(__file__).parents[1] / "instagram-to-anki/scripts"
+SCRIPTS = Path(__file__).parents[1] / "scripts"
 
 
 def load(name: str):

@@ -22,7 +22,7 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-TOOL="instagram-to-anki/scripts/browser_sync.py"
+TOOL="scripts/browser_sync.py"
 OUT="${INS2ANKI_OUTPUT:-$PWD/instagram-saved}"
 
 echo "=== 检查浏览器会话 ==="

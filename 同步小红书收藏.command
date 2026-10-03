@@ -29,7 +29,7 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-TOOL="instagram-to-anki/scripts/favorites_sync.py"
+TOOL="scripts/favorites_sync.py"
 PLATFORM="${INS2ANKI_PLATFORM:-xiaohongshu}"
 OUT="${INS2ANKI_OUTPUT:-$PWD/xhs-saved/收藏}"
 ARGS=(--platform "$PLATFORM")

@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 
-SCRIPT = Path(__file__).parents[1] / "instagram-to-anki/scripts/sync_instagram_saved.py"
+SCRIPT = Path(__file__).parents[1] / "scripts/sync_instagram_saved.py"
 SPEC = importlib.util.spec_from_file_location("sync_instagram_saved", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
@@ -17,7 +17,7 @@ SPEC.loader.exec_module(MODULE)
 
 COLLECTIONS_SCRIPT = (
     Path(__file__).parents[1]
-    / "instagram-to-anki/scripts/sync_instagram_collections.py"
+    / "scripts/sync_instagram_collections.py"
 )
 COLLECTIONS_SPEC = importlib.util.spec_from_file_location(
     "sync_instagram_collections", COLLECTIONS_SCRIPT

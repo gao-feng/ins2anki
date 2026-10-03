@@ -75,7 +75,7 @@ inventory.
 
 ## 2. Transcribe and extract vocabulary
 
-For video, transcribe audible English with timestamps. Prefer an available local speech-to-text tool; see [references/tooling.md](references/tooling.md) for reliable command patterns. For image/carousel posts, extract visible English with OCR or visual inspection. Include caption text when it is available in `manifest.json`.
+For video, transcribe audible English with timestamps. Prefer an available local speech-to-text tool; see [tooling.md](tooling.md) for reliable command patterns. For image/carousel posts, extract visible English with OCR or visual inspection. Include caption text when it is available in `manifest.json`.
 
 Select genuinely challenging, useful words or short fixed expressions. Exclude names, URLs, obvious OCR errors, basic function words, and terms unsupported by the source. Judge difficulty from context rather than word length alone. Default to CEFR B2-C2 candidates when the learner's level is unknown.
 
@@ -104,7 +104,7 @@ Stop here. Do not invoke AnkiConnect, create a deck, upload media, or add notes 
 
 ## 4. Save the confirmed notes
 
-Create a UTF-8 JSON file matching [references/selection-schema.md](references/selection-schema.md). Include only confirmed entries and meanings.
+Create a UTF-8 JSON file matching [selection-schema.md](selection-schema.md). Include only confirmed entries and meanings.
 
 If pronunciation was confirmed, generate the audio first — for each confirmed word run:
 
