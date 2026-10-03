@@ -2,6 +2,11 @@
 /downloads/
 /.codex-work/
 /instagram-saved/
+/xhs-saved/
+/douyin-saved/
+/xiaohongshu-saved/
+/*-inventory.json
+.DS_Store
 
 # Personal saved-collection inventories (account + private post URLs)
 /collections.json

@@ -28,9 +28,22 @@ Strategy selection:
   `yt-dlp` exposes only a cover image. The item is marked `failed` with an
   explicit reason rather than being saved as a cover.
 
-None of these platforms expose an enumerable favorites feed to `yt-dlp`. Use
-`scripts/browser/export_collection.js` on the logged-in 收藏 page to produce an
-inventory, then feed it to `sync_saved.py --urls-file` or
+None of these platforms expose an enumerable favorites feed to `yt-dlp`.
+
+Preferred path (Instagram): reuse the logged-in browser through CDP instead of
+exporting cookies. `scripts/browser_sync.py launch` opens a dedicated profile
+once, `check` verifies the session, and `sync --all-collections` enumerates,
+downloads the signed CDN URLs directly, and writes the same layout as the
+yt-dlp path. No cookies, no Keychain prompts, no agent.
+
+Enumeration tries three routes in order: Instagram's REST feed, then the JSON
+the page fetches for itself (read off the CDP `Network` domain, which survives
+Instagram retiring a REST path such as `/api/v1/collections/list/`), then DOM
+link harvesting with yt-dlp as the media fallback. `scripts/browser_sync.py
+diagnose` prints the API paths the page actually called when none of them work.
+
+Fallback path: use `scripts/browser/export_collection.js` on the logged-in 收藏
+page to produce an inventory, then feed it to `sync_saved.py --urls-file` or
 `sync_collections.py --inventory`.
 
 ## Local transcription

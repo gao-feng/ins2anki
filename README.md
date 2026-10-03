@@ -40,7 +40,8 @@ instagram-to-anki/
 
 ## Prerequisites
 
-- [opencode](https://opencode.ai) — the skill runs inside an opencode session
+- [opencode](https://opencode.ai) — optional; only the agent-driven workflow needs it
+- A Chromium-based browser (Edge/Chrome/Chromium/Brave) — only for the browser-session sync below
 - Python 3.10+
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — Instagram download
 - [`ffmpeg`](https://ffmpeg.org/) — audio extraction for transcription and MP3 encoding for TTS
@@ -65,6 +66,114 @@ Inside an opencode session, give an Instagram URL and ask to study its English:
 > https://www.instagram.com/p/DYaN8HxT-pt/
 
 The agent runs the workflow, presents candidates, and waits for your confirmation before touching Anki. The default deck is `ins`.
+
+### 一键同步整个 Instagram 收藏夹（推荐，不需要 cookie）
+
+双击仓库根目录的 [同步收藏夹.command](<同步收藏夹.command>) 即可。首次运行会打开一个
+**专用浏览器窗口**（profile 在 `~/.ins2anki/browser-profile`，与你平时的 Edge/Chrome 互不影响），
+在里面登录一次 Instagram；之后每次双击都只做增量同步，已下载的自动跳过，文件写到
+`instagram-saved/<收藏夹名>/`。
+
+这条路不导出、不读取 cookie，因此**不会触发 macOS 钥匙串的"访问机密信息"授权弹窗**：
+登录态留在浏览器里，脚本只让页面自己调用 Instagram 的网页接口，拿到带签名的媒体直链后由
+Python 直接下载（[browser_sync.py](<instagram-to-anki/scripts/browser_sync.py>)）。
+整条链路是确定性的，不需要 AI 或 skill 参与。
+
+命令行等价形式：
+
+```bash
+python3 instagram-to-anki/scripts/browser_sync.py launch   # 一次性：打开专用浏览器并登录
+python3 instagram-to-anki/scripts/browser_sync.py check    # 确认登录状态与收藏夹数量
+python3 instagram-to-anki/scripts/browser_sync.py sync \
+  --all-collections --output-root instagram-saved
+```
+
+只同步一个收藏夹：
+
+```bash
+python3 instagram-to-anki/scripts/browser_sync.py sync \
+  --collection 自然 --output-dir instagram-saved/自然
+```
+
+产物与 yt-dlp 路径完全一致（`<短码>/<短码>_<作者>.mp4|.jpg`、`manifest.json`、
+`sync-state.json`），所以下游选片与 Anki 导入脚本无需改动。补充开关：
+
+- `--jobs N`：并行下载数（默认 4，启动器用 6）。签名直链彼此独立，并发是安全的
+- `--dom-fallback`：网页接口返回不了时，改为滚动页面抓取帖子链接（此时媒体回退到 yt-dlp）
+- `--no-yt-dlp-fallback`：没有直链的条目直接记为失败，而不是悄悄回退到慢路径
+- `--prefer-yt-dlp`：把同一批条目交回旧的 yt-dlp 路径，用于对照排查
+- `--no-include-photos`：只要视频，跳过图片帖
+- `--limit N`：每个收藏夹本次最多下载 N 条（想先试水就用 `--limit 5`）
+
+#### 已经下过的不会重下
+
+`--all-collections` 会先看 `--output-root` 里已有的文件夹：每个 `sync-state.json` 都记录了它来自哪个收藏夹，
+所以**旧的目录树本身就是一份本地清单**，不依赖任何接口。已完成的条目直接跳过，只补新条目与失败项，
+并且继续写在原来的文件夹里（例如 `instagram-saved/自然/`）。
+
+#### QuickTime 打不开某些 mp4？
+
+那些是 **VP9 编码** 的视频（装在 mp4 容器里）。macOS 自己的解码器（QuickTime Player、预览、照片、Quick Look/缩略图）
+只支持 H.264 与 HEVC，**不支持 VP9/AV1**；VLC、IINA 可以放。旧流程走 yt-dlp，而 yt-dlp 默认偏好 VP9（同码率更清晰），
+所以早期下载的文件大量是这种。
+
+现在的会话路径拿到的是 Instagram 自己的渐进式 `video_versions`（H.264 + AAC），双击就能播；
+yt-dlp 回退路径也已固定为 `--format 'bv*[vcodec^=avc1]+ba[acodec^=mp4a]/…' --merge-output-format mp4`。
+
+刷新历史文件（重新从 Instagram 取 H.264，无损，比本地转码快）：
+
+```bash
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved           # 只报告
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --forget  # 记为待重下
+# 然后双击 同步收藏夹.command（或跑一次 sync --all-collections）
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved           # 期望 unplayable: 0
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --clean    # 删掉备份
+```
+
+`--forget` **不删除**原文件：它把条目目录改名为 `<短码>.unplayable/` 并从 sync state 中移除，
+所以即使那条帖子已被删除，原件仍在磁盘上可恢复。
+
+#### 网络抖动会自动重试
+
+Instagram 的 CDN 经常在传输中途掐断连接（`SSL: UNEXPECTED_EOF_WHILE_READING`、`IncompleteRead`、5xx）。
+下载会重试 4 次（指数退避），并用 `Range` 从断点续传，所以轮播图里某一张断线不会让整条帖子失败；
+重试的条目也不会重复下载已经落盘的那几张图/视频。仍然失败的条目会在日志末尾列出 `<短码>: 原因`，
+同一份信息也在汇总 JSON 的 `failures` 和 `sync-state.json` 里；再跑一次只会重试这些失败项。
+
+#### 如果 Instagram 改了接口
+
+`/api/v1/collections/list/` 这类 REST 路径随时可能被下线（现在就会返回 **404 + SPA 外壳**）。
+工具会自动降级到**读取页面自己发出的请求**：让收藏页自己加载，再从 CDP 的 `Network` 域读它拿到的
+JSON（REST 或 GraphQL 都行），所以接口改名不影响使用。日志里会看到：
+
+```
+note: page JavaScript failed: Error: HTTP 404 for /api/v1/collections/list/: <!DOCTYPE html>...
+reading the collections the saved page loads for itself ...
+capture: 3 item(s) from 2 response(s) the page fetched
+```
+
+需要排查时用 `diagnose`，它会列出页面**实际**请求了哪些 API 路径、抓到几个响应、能解析出多少条目：
+
+```bash
+python3 instagram-to-anki/scripts/browser_sync.py diagnose --launch
+```
+
+- `"json_responses": 0`：页面还没加载完，加大 `--scroll-rounds`
+- 有响应但 `"media_items": 0`：解析规则没覆盖这种返回，把 `api_paths_called` 发我即可
+
+#### 为什么这条路快很多
+
+| | 会话路径（本工具） | yt-dlp 路径 |
+| --- | --- | --- |
+| 每条帖子的开销 | 0（枚举时一次性拿到全部直链） | 一次完整 extractor：多次 API 往返 + 限速退避 |
+| 传输 | 带签名的 CDN 直链，普通 HTTP GET，可 `--jobs` 并行 | 串行，且要与解析交错 |
+| 登录 | 复用浏览器会话，不导出 cookie、不读钥匙串 | 需要 cookie 文件或 `--cookies-from-browser` |
+
+所以"7 小时"几乎总是 yt-dlp 的解析开销，而不是带宽。每次运行结束的 JSON 里会给出
+`via_session` / `via_ytdlp` 两个计数：如果 `via_ytdlp` 不为 0，慢的就是它（常见原因是被限流或
+专用浏览器窗口没登录），用 `--no-yt-dlp-fallback` 可以让这些条目直接失败暴露出来。
+每条日志里有单文件 `MiB/s` 和整体 `items/s + eta`，先跑 `--limit 5` 就能估出全量时间。
+`sync-state.json` 里还记录了这次运行的 `jobs` 与 `elapsed_seconds`。
 
 ### Incrementally sync a saved collection
 

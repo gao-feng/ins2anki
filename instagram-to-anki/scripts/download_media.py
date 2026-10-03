@@ -108,6 +108,16 @@ def probe(
     return None, stderr
 
 
+#: Codec order that keeps the result playable in macOS's own players.
+AVC_FIRST_FORMAT = (
+    "bv*[vcodec^=avc1]+ba[acodec^=mp4a]"
+    "/b[vcodec^=avc1]"
+    "/bv*[ext=mp4]+ba[ext=m4a]"
+    "/b[ext=mp4]"
+    "/b"
+)
+
+
 def download_video(
     exe: str,
     url: str,
@@ -118,6 +128,14 @@ def download_video(
     cmd = [
         exe,
         "--no-playlist",
+        # QuickTime/AVFoundation decodes H.264 and HEVC only: a VP9 or AV1
+        # stream (yt-dlp's default preference on many sites) downloads fine but
+        # will not open in QuickTime Player, Photos or Quick Look. Prefer
+        # H.264 + AAC, then any mp4, and let yt-dlp merge into mp4.
+        "--format",
+        AVC_FIRST_FORMAT,
+        "--merge-output-format",
+        "mp4",
         "--write-info-json",
         "--write-description",
         "--write-thumbnail",

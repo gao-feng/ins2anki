@@ -38,8 +38,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -54,6 +56,18 @@ WHITESPACE = re.compile(r"\s+")
 DownloadFn = Callable[
     [Path, str, Path, "Path | None", "str | None"], "tuple[bool, str]"
 ]
+
+
+def format_duration(seconds: float) -> str:
+    """Render a duration as ``5m04s`` / ``1h12m`` for progress lines."""
+    total = int(max(seconds, 0))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 def now_iso() -> str:
@@ -198,12 +212,19 @@ def sync_items(
     dry_run: bool = False,
     limit: int | None = None,
     stream: Any = None,
+    jobs: int = 1,
 ) -> int:
     """Run one incremental sync pass and return a process exit code.
 
     ``discovered`` is a list of ``(platform, item_id, url)`` tuples, already
     normalized and deduplicated by the caller. Progress goes to stderr so
     stdout carries only the final JSON summary and stays pipeable.
+
+    ``jobs`` downloads several items at once. Items are independent (one
+    directory each) and signed CDN URLs are per-file, so parallelism is safe
+    and is what closes the gap to a browser extension: a per-item extractor
+    such as yt-dlp cannot be parallelised this cheaply because most of its time
+    is spent in rate-limited API round trips rather than in the transfer.
     """
     out = stream or sys.stdout
     output_dir = output_dir.resolve()
@@ -261,19 +282,16 @@ def sync_items(
 
     completed_count = 0
     failed_count = 0
-    for index, (platform, item_id, url) in enumerate(pending, 1):
-        print(f"[{index}/{len(pending)}] {item_id} ({platform})", flush=True,
-              file=sys.stderr)
+    started = time.monotonic()
+
+    def prepare(item_id: str) -> None:
         item = items[item_id]
         item["attempts"] = int(item.get("attempts", 0)) + 1
         item["last_attempt_at"] = now_iso()
-        ok, detail = download_fn(
-            downloader,
-            url,
-            output_dir / item_id,
-            cookies,
-            cookies_from_browser,
-        )
+
+    def record(item_id: str, ok: bool, detail: str) -> None:
+        nonlocal completed_count, failed_count
+        item = items[item_id]
         if ok:
             completed_count += 1
             item.update({
@@ -286,6 +304,66 @@ def sync_items(
             failed_count += 1
             item.update({"status": "failed", "error": detail[-4000:]})
         write_json_atomic(state_file, state)
+        done = completed_count + failed_count
+        elapsed = time.monotonic() - started
+        rate = done / elapsed if elapsed > 0 else 0.0
+        remaining = max(len(pending) - done, 0)
+        eta = remaining / rate if rate > 0 else 0.0
+        reason = "" if ok else f"  {detail.splitlines()[0][:160]}"
+        print(
+            f"[{done}/{len(pending)}] {item_id} {'ok' if ok else 'FAILED'}"
+            f"  {rate:.1f} items/s  elapsed {format_duration(elapsed)}"
+            f"  eta {format_duration(eta)}{reason}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if jobs <= 1:
+        for _platform, item_id, url in pending:
+            prepare(item_id)
+            ok, detail = download_fn(
+                downloader, url, output_dir / item_id, cookies, cookies_from_browser
+            )
+            record(item_id, ok, detail)
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = {}
+            for _platform, item_id, url in pending:
+                prepare(item_id)
+                future = pool.submit(
+                    download_fn,
+                    downloader,
+                    url,
+                    output_dir / item_id,
+                    cookies,
+                    cookies_from_browser,
+                )
+                futures[future] = item_id
+            for future in as_completed(futures):
+                item_id = futures[future]
+                try:
+                    ok, detail = future.result()
+                except Exception as exc:  # a worker must never kill the run
+                    ok, detail = False, f"unexpected download error: {exc}"
+                record(item_id, ok, detail)
+
+    # Keep the last run's shape on disk: it explains a slow or failed pass
+    # without having to re-read the console output.
+    state["jobs"] = max(jobs, 1)
+    state["elapsed_seconds"] = round(time.monotonic() - started, 1)
+    write_json_atomic(state_file, state)
+
+    attempted_ids = {entry[1] for entry in pending}
+    failed_now = [
+        (key, str(value.get("error") or "").splitlines()[0][:200])
+        for key, value in items.items()
+        if value.get("status") == "failed" and key in attempted_ids
+    ]
+    if failed_now:
+        print(f"{len(failed_now)} item(s) failed; rerun to retry them:", file=sys.stderr)
+        for key, reason in failed_now:
+            print(f"  {key}: {reason}", file=sys.stderr)
+        print(f"  (details also in {state_file})", file=sys.stderr)
 
     total_completed = sum(1 for item in items.values() if item.get("status") == "completed")
     total_failed = sum(1 for item in items.values() if item.get("status") == "failed")
@@ -297,5 +375,8 @@ def sync_items(
         "total_completed": total_completed,
         "total_failed": total_failed,
         "state_file": str(state_file),
+        "jobs": max(jobs, 1),
+        "elapsed_seconds": round(time.monotonic() - started, 1),
+        "failures": [{"id": key, "error": reason} for key, reason in failed_now[:20]],
     }, ensure_ascii=False, indent=2), file=out)
     return 2 if failed_count else 0

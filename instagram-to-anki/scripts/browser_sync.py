@@ -1,0 +1,1010 @@
+#!/usr/bin/env python3
+"""Enumerate and download Instagram saved collections through a live browser.
+
+This is route 2 of the sync design: no cookie export, no ``yt-dlp`` extractor
+for Instagram. The page (which is already logged in) calls Instagram's own web
+API, the script takes the *signed* CDN URLs it returns, and Python streams them
+straight to disk using the same directory layout, ``manifest.json`` and
+``sync-state.json`` the rest of the pipeline already understands.
+
+Typical first run::
+
+    python3 browser_sync.py launch          # opens a dedicated profile window
+    #  -> log into Instagram once, leave the window open
+    python3 browser_sync.py check
+    python3 browser_sync.py collections
+    python3 browser_sync.py sync --collection 自然 --output-dir ~/Downloads/instagram-saved/自然 --limit 3
+
+Later runs only need ``sync``; ``--launch`` starts the browser automatically
+when nothing is listening yet.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import browser_session  # noqa: E402
+import cdp  # noqa: E402
+import sync_common  # noqa: E402
+from browser_session import (  # noqa: E402
+    DEFAULT_ENDPOINT,
+    DEFAULT_PROFILE_DIR,
+    INSTAGRAM_ORIGIN,
+    SessionError,
+    InstagramSession,
+)
+
+
+DOWNLOADER = Path(__file__).with_name("download_media.py")
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+# --------------------------------------------------------------------------
+# Session helpers
+# --------------------------------------------------------------------------
+
+
+def open_session(args: argparse.Namespace) -> InstagramSession:
+    """Connect to the browser, launching it when requested and allowed."""
+    endpoint = args.endpoint
+    if not browser_session.is_browser_running(endpoint):
+        if not args.launch:
+            raise SessionError(
+                f"no browser is listening on {endpoint}; pass --launch or run "
+                "`browser_sync.py launch` first"
+            )
+        log(f"starting {args.browser or 'a Chromium browser'} on {endpoint} ...")
+        browser_session.launch_browser(
+            browser=args.browser,
+            profile_dir=Path(args.profile_dir),
+            port=args.port,
+            url=INSTAGRAM_ORIGIN,
+        )
+    session = InstagramSession(
+        endpoint=endpoint, timeout=args.timeout, origin=args.origin
+    )
+    session.connect()
+    return session
+
+
+def resolve_username(session: InstagramSession, args: argparse.Namespace) -> str:
+    """Use ``--username`` when given, otherwise ask the logged-in page."""
+    if args.username:
+        return args.username
+    try:
+        username = str(session.whoami().get("username") or "")
+    except (SessionError, cdp.CdpError):
+        username = ""
+    if username:
+        log(f"account: {username}")
+    return username
+
+
+def list_collections(session: InstagramSession, args: argparse.Namespace) -> tuple[list[dict], str]:
+    """Return ``(collections, source)``, preferring REST then network capture."""
+    try:
+        collections = session.collections()
+        if collections:
+            return collections, "api"
+        rest_error = "the collection-list endpoint returned nothing"
+    except (SessionError, cdp.CdpError) as exc:
+        rest_error = str(exc)
+    if not getattr(args, "capture", True):
+        raise SessionError(
+            f"{rest_error}; retry without --no-capture to read the page's own requests"
+        )
+    log(f"note: {rest_error}")
+    log("reading the collections the saved page loads for itself ...")
+    try:
+        collections = session.collections_via_capture(
+            args.username, rounds=args.scroll_rounds, delay_ms=args.scroll_delay_ms
+        )
+    except (SessionError, cdp.CdpError) as exc:
+        raise SessionError(f"{rest_error}; page capture also failed: {exc}")
+    if collections:
+        return collections, "browser-network"
+    raise SessionError(
+        f"{rest_error}; the saved page did not expose any collection either. "
+        "Run `diagnose` to see which API paths the page called."
+    )
+
+
+SAVED_ID_PATTERN = re.compile(r"/saved/(?:[^/]+/)?(\d+)")
+
+
+def collections_from_state(root: Path) -> list[dict]:
+    """Recover collections from the folders an earlier run already created.
+
+    Every ``sync-state.json`` records the collection URL it came from, so an
+    existing output tree is a *local, deterministic* inventory: it needs no API,
+    survives Instagram renaming endpoints, and keeps each collection in the
+    folder it already lives in instead of re-downloading into a new one.
+    """
+    found: list[dict] = []
+    for state_file in sorted(root.glob("*/sync-state.json")):
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        url = str(state.get("source") or "")
+        match = SAVED_ID_PATTERN.search(url)
+        if not match:
+            continue
+        found.append({
+            "id": match.group(1),
+            "name": state_file.parent.name,
+            "url": url,
+            "source": "state-file",
+        })
+    return found
+
+
+def resolve_collection(
+    session: InstagramSession, query: str, args: argparse.Namespace
+) -> dict:
+    collections, _source = list_collections(session, args)
+    return browser_session.match_collection(collections, query)
+
+
+def enumerate_items(
+    session: InstagramSession, collection: dict, args: argparse.Namespace
+) -> tuple[list[dict], str]:
+    """Return ``(items, source)``, trying every route from fast to safest.
+
+    * ``api`` — the page replays Instagram's REST feed; items carry signed URLs.
+    * ``browser-network`` — the page is scrolled and the JSON it fetches for
+      itself is read off CDP; also yields signed URLs, and keeps working when
+      the REST route is retired.
+    * ``dom`` — only post links are harvested; media falls back to yt-dlp.
+    """
+    collection_id = str(collection.get("id") or "")
+    url = str(collection.get("url") or "") or browser_session.collection_url(
+        collection_id, username=args.username, origin=args.origin
+    )
+    problems: list[str] = []
+
+    if collection_id:
+        try:
+            payload = session.collection_items(
+                collection_id, max_items=args.max_items, delay_ms=args.delay_ms
+            )
+        except (SessionError, cdp.CdpError) as exc:
+            problems.append(f"feed endpoint: {exc}")
+        else:
+            errors = [str(value) for value in payload.get("errors") or []]
+            for message in errors:
+                problems.append(f"feed endpoint: {message}")
+            items = browser_session.project_items(payload.get("items") or [])
+            if items:
+                log(f"api: {len(items)} item(s) over {payload.get('pages')} page(s)")
+                return items, "api"
+
+    if args.capture:
+        try:
+            payload = session.items_via_capture(
+                url,
+                rounds=args.scroll_rounds,
+                delay_ms=args.scroll_delay_ms,
+                max_items=args.max_items,
+            )
+        except (SessionError, cdp.CdpError) as exc:
+            problems.append(f"page capture: {exc}")
+        else:
+            items = payload["items"]
+            if items:
+                log(
+                    f"capture: {len(items)} item(s) from {payload['pages']} "
+                    f"response(s) the page fetched"
+                )
+                return items, "browser-network"
+            problems.append(
+                "page capture: the page loaded without exposing any media"
+            )
+
+    if not args.dom_fallback:
+        detail = "; ".join(problems) or "no route produced items"
+        raise SessionError(
+            f"{collection.get('name')!r}: {detail}. Retry with --dom-fallback to "
+            "harvest post links from the page (media will use yt-dlp)."
+        )
+
+    log(f"dom: scrolling {url} for post links ...")
+    links = session.dom_links(url, rounds=args.dom_rounds, delay_ms=args.dom_delay_ms)
+    items = [{"code": link.rstrip("/").rsplit("/", 1)[-1], "children": []} for link in links]
+    items = browser_session.project_items(items)
+    log(f"dom: {len(items)} item(s)")
+    return items, "dom"
+
+
+# --------------------------------------------------------------------------
+# Downloading through the session
+# --------------------------------------------------------------------------
+
+
+def write_sidecars(item: dict, directory: Path) -> Path:
+    """Write ``*.info.json`` and ``*.description`` beside the media."""
+    base = browser_session.safe_filename(
+        f"{browser_session.item_shortcode(item)}_{item.get('username') or 'unknown'}"
+    )
+    metadata = browser_session.trimmed_metadata(item)
+    info_json = directory / f"{base}.info.json"
+    info_json.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    caption = str(item.get("caption") or "")
+    if caption:
+        (directory / f"{base}.description").write_text(caption, encoding="utf-8")
+    return info_json
+
+
+def make_session_downloader(
+    media_by_url: dict[str, dict],
+    prefer_ytdlp: bool = False,
+    allow_ytdlp_fallback: bool = True,
+    stats: dict[str, int] | None = None,
+) -> sync_common.DownloadFn:
+    """Build a ``download_fn`` that streams signed CDN URLs itself.
+
+    Items without a direct URL (DOM fallback, or a platform the API did not
+    describe) are handed to the existing yt-dlp downloader, so the two paths
+    coexist in one sync run. Every item is counted in ``stats`` so a slow run
+    can be explained instead of guessed at: yt-dlp needs a full extractor pass
+    per post, the session path is a plain authenticated HTTP GET.
+    """
+    counters = stats if stats is not None else {}
+
+    def fallback(
+        downloader: Path,
+        url: str,
+        output_dir: Path,
+        cookies: Path | None,
+        cookies_from_browser: str | None,
+    ) -> tuple[bool, str]:
+        return sync_common.run_download(
+            downloader, url, output_dir, cookies, cookies_from_browser, platform="instagram"
+        )
+
+    def use_ytdlp(
+        downloader: Path,
+        url: str,
+        output_dir: Path,
+        cookies: Path | None,
+        cookies_from_browser: str | None,
+        reason: str,
+    ) -> tuple[bool, str]:
+        counters["via_ytdlp"] = counters.get("via_ytdlp", 0) + 1
+        if not allow_ytdlp_fallback:
+            return False, f"yt-dlp fallback disabled ({reason}); no direct media URL"
+        log(f"yt-dlp fallback ({reason}): {url}")
+        return fallback(downloader, url, output_dir, cookies, cookies_from_browser)
+
+    def download(
+        downloader: Path,
+        url: str,
+        output_dir: Path,
+        cookies: Path | None,
+        cookies_from_browser: str | None,
+    ) -> tuple[bool, str]:
+        item = media_by_url.get(url)
+        if prefer_ytdlp:
+            return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "--prefer-yt-dlp")
+        if item is None:
+            return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "no API payload")
+        plan = browser_session.item_media(item)
+        if not plan:
+            return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "no media in payload")
+        counters["via_session"] = counters.get("via_session", 0) + 1
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        multiple = len(plan) > 1
+        files: list[Path] = []
+        try:
+            for media in plan:
+                destination = output_dir / browser_session.item_filename(item, media, multiple)
+                if destination.exists() and destination.stat().st_size > 0:
+                    # a retried item must not re-download the parts that already
+                    # completed before the failure
+                    log(f"  [{browser_session.item_shortcode(item)}] {destination.name} already on disk")
+                    files.append(destination)
+                    continue
+                started_at = time.monotonic()
+                size = browser_session.download_url(media["url"], destination)
+                seconds = max(time.monotonic() - started_at, 1e-6)
+                log(
+                    f"  [{browser_session.item_shortcode(item)}] {destination.name} "
+                    f"{size / 1048576:.1f} MiB in {seconds:.1f}s "
+                    f"({size / 1048576 / seconds:.1f} MiB/s)"
+                )
+                files.append(destination)
+        except SessionError as exc:
+            return False, str(exc)
+
+        info_json = write_sidecars(item, output_dir)
+        manifest = browser_session.build_manifest(item, files, output_dir, info_json=info_json)
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return True, f"browser session: {len(files)} file(s)"
+
+    return download
+
+
+# --------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------
+
+
+def command_check(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {"endpoint": args.endpoint}
+    try:
+        payload["browser"] = cdp.version(args.endpoint, timeout=args.timeout).get("Browser")
+    except cdp.CdpError as exc:
+        payload["error"] = str(exc)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 2
+    with InstagramSession(
+        endpoint=args.endpoint, timeout=args.timeout, origin=args.origin
+    ) as session:
+        who = session.whoami()
+        payload.update({"logged_in": bool(who.get("logged_in")), "username": who.get("username") or None})
+        if who.get("logged_in"):
+            args.username = args.username or who.get("username") or ""
+            try:
+                collections, source = list_collections(session, args)
+            except (SessionError, cdp.CdpError, RuntimeError) as exc:
+                payload["collections_error"] = str(exc)
+            else:
+                payload["collections"] = len(collections)
+                payload["collections_source"] = source
+                payload["collection_names"] = [item.get("name") for item in collections]
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("logged_in") else 2
+
+
+PLAYABLE_VIDEO_CODECS = frozenset(
+    {"h264", "avc1", "avc3", "hevc", "h265", "hev1", "hvc1", "mjpeg", "prores", "mpeg4"}
+)
+VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov")
+BACKUP_SUFFIX = ".unplayable"
+
+
+def probe_video_codec(path: Path, exe: str | None = None) -> str | None:
+    """Return the first video codec of ``path`` (e.g. ``vp9``), or None."""
+    exe = exe or shutil.which("ffprobe")
+    if not exe:
+        return None
+    try:
+        completed = subprocess.run(
+            [
+                exe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    first = (completed.stdout or "").strip().splitlines()
+    if not first:
+        return None
+    return first[0].split(",")[0].strip() or None
+
+
+def find_unplayable(root: Path, probe=probe_video_codec) -> list[dict]:
+    """List completed downloads whose video codec QuickTime cannot decode.
+
+    Instagram's own progressive ``video_versions`` are H.264, but anything that
+    went through yt-dlp may be VP9/AV1 in an mp4 container: playable in VLC,
+    invisible to QuickTime Player, Photos and Quick Look.
+    """
+    root = Path(root)
+    findings: list[dict] = []
+    for state_file in sorted(root.glob("*/sync-state.json")):
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for item_id, item in (state.get("items") or {}).items():
+            if not isinstance(item, dict) or item.get("status") != "completed":
+                continue
+            directory = Path(str(item.get("output_dir") or state_file.parent / str(item_id)))
+            if not directory.is_dir():
+                continue
+            for media in sorted(directory.iterdir()):
+                if not media.is_file() or media.suffix.lower() not in VIDEO_SUFFIXES:
+                    continue
+                codec = probe(media)
+                if codec and codec.casefold() not in PLAYABLE_VIDEO_CODECS:
+                    findings.append({
+                        "collection": state_file.parent.name,
+                        "id": str(item_id),
+                        "codec": codec,
+                        "media": str(media),
+                        "directory": str(directory),
+                        "state_file": str(state_file),
+                    })
+    return findings
+
+
+def command_repair(args: argparse.Namespace) -> int:
+    """Report (or forget) downloads that macOS players cannot open."""
+    if getattr(args, "clean", False):
+        return command_clean(args)
+    root = Path(args.output_root).expanduser().resolve()
+    if not root.is_dir():
+        print(f"error: {root} is not a directory", file=sys.stderr)
+        return 2
+    if not shutil.which("ffprobe"):
+        log("note: ffprobe not found; install ffmpeg to detect codecs")
+    findings = find_unplayable(root)
+    by_codec: dict[str, int] = {}
+    for finding in findings:
+        by_codec[finding["codec"]] = by_codec.get(finding["codec"], 0) + 1
+    if not findings:
+        print(json.dumps({"root": str(root), "unplayable": 0}, ensure_ascii=False, indent=2))
+        return 0
+    if not args.forget:
+        print(json.dumps({
+            "root": str(root),
+            "unplayable": len(findings),
+            "by_codec": by_codec,
+            "items": sorted({finding["id"] for finding in findings}),
+            "next": [
+                "rerun with --forget to drop these items from the sync state",
+                "then sync again: the browser session fetches Instagram's H.264 version",
+            ],
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    forgotten: set[tuple[str, str]] = set()
+    parked: list[str] = []
+    for finding in findings:
+        directory = Path(finding["directory"]).resolve()
+        if not directory.is_relative_to(root):
+            log(f"refusing to touch {directory} (outside {root})")
+            continue
+        # Rename instead of deleting: the item is dropped from the state so the
+        # next sync fetches Instagram's H.264 version, but if that post is gone
+        # the original file is still recoverable right next to it.
+        backup = directory.with_name(directory.name + BACKUP_SUFFIX)
+        counter = 2
+        while backup.exists():
+            backup = directory.with_name(f"{directory.name}{BACKUP_SUFFIX}{counter}")
+            counter += 1
+        try:
+            directory.rename(backup)
+        except OSError as exc:
+            log(f"could not park {directory}: {exc}")
+            continue
+        parked.append(str(backup))
+        forgotten.add((finding["state_file"], finding["id"]))
+
+    for state_path in {finding["state_file"] for finding in findings}:
+        path = Path(state_path)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        items = state.get("items") or {}
+        for key in [key for key in items if (state_path, key) in forgotten]:
+            del items[key]
+        sync_common.write_json_atomic(path, state)
+
+    print(json.dumps({
+        "root": str(root),
+        "forgotten": len(forgotten),
+        "parked": parked,
+        "by_codec": by_codec,
+        "next": [
+            "run sync again: these items will be fetched as H.264",
+            f"originals were renamed with a {BACKUP_SUFFIX} suffix, not deleted",
+            f"delete them once you are happy: repair --output-root {root} --clean",
+        ],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_clean(args: argparse.Namespace) -> int:
+    """Remove the ``*.vp9`` backups left behind by a repair run."""
+    root = Path(args.output_root).expanduser().resolve()
+    removed: list[str] = []
+    for backup in sorted(root.glob(f"*/**/*{BACKUP_SUFFIX}*")):
+        if not backup.is_dir() or not backup.is_relative_to(root):
+            continue
+        try:
+            shutil.rmtree(backup)
+            removed.append(str(backup))
+        except OSError as exc:
+            log(f"could not remove {backup}: {exc}")
+    print(json.dumps({"root": str(root), "removed": len(removed)}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_diagnose(args: argparse.Namespace) -> int:
+    """Show what the page itself asks for, so a broken route is self-explaining."""
+    report: dict[str, Any] = {"endpoint": args.endpoint, "origin": args.origin}
+    with open_session(args) as session:
+        who = session.whoami()
+        report["username"] = who.get("username") or None
+        report["logged_in"] = bool(who.get("logged_in"))
+        if not report["logged_in"]:
+            report["next"] = [
+                "run: browser_sync.py launch",
+                "log into Instagram in that window, then rerun diagnose",
+            ]
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return 2
+        args.username = args.username or who.get("username") or ""
+        try:
+            payload = session.collection_items(
+                str(args.collection or ""), max_items=1, delay_ms=args.delay_ms
+            )
+        except (SessionError, cdp.CdpError) as exc:
+            report["rest_feed"] = {"ok": False, "error": str(exc)}
+        else:
+            report["rest_feed"] = {
+                "ok": bool(payload.get("items")),
+                "items": len(payload.get("items") or []),
+                "errors": payload.get("errors") or [],
+            }
+        saved_url = browser_session.collection_url(
+            None, username=args.username, origin=args.origin
+        )
+        log(f"diagnose: reading {saved_url} ...")
+        page = session.capture_page(
+            saved_url,
+            rounds=args.scroll_rounds,
+            delay_ms=args.scroll_delay_ms,
+            max_items=args.max_items,
+        )
+        report["saved_page"] = {
+            "url": page["url"],
+            "json_responses": page["payloads"],
+            "media_items": len(page["items"]),
+            "collections": page["collections"],
+            "dom_links": len(page["links"]),
+        }
+        report["api_paths_called"] = page["api_urls"]
+        if not page["payloads"]:
+            report["hint"] = (
+                "the page made no JSON request matching /api/v1/ or /graphql; "
+                "make sure it finished loading (or raise --scroll-rounds)"
+            )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_launch(args: argparse.Namespace) -> int:
+    process, endpoint = browser_session.launch_browser(
+        browser=args.browser,
+        profile_dir=Path(args.profile_dir),
+        port=args.port,
+        url=INSTAGRAM_ORIGIN,
+    )
+    print(json.dumps({
+        "endpoint": endpoint,
+        "profile_dir": str(Path(args.profile_dir).expanduser()),
+        "pid": process.pid,
+        "next": [
+            "log into Instagram in the window that just opened",
+            "keep it open, then run: browser_sync.py check",
+        ],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def command_collections(args: argparse.Namespace) -> int:
+    with open_session(args) as session:
+        args.username = resolve_username(session, args)
+        collections, source = list_collections(session, args)
+    log(f"collection list came from: {source}")
+    if args.json:
+        print(json.dumps(collections, ensure_ascii=False, indent=2))
+        return 0
+    if not collections:
+        print("no saved collections were returned; is this account logged in?")
+        return 2
+    width = max(len(str(item.get("name"))) for item in collections)
+    for collection in collections:
+        count = collection.get("count")
+        suffix = f"  {count} items" if count is not None else ""
+        print(f"{str(collection.get('name')).ljust(width)}  {collection.get('id')}{suffix}")
+    return 0
+
+
+def command_inventory(args: argparse.Namespace) -> int:
+    with open_session(args) as session:
+        args.username = resolve_username(session, args)
+        collection = resolve_collection(session, args.collection, args)
+        items, source = enumerate_items(session, collection, args)
+    inventory = browser_session.build_inventory(
+        str(collection.get("name") or args.collection),
+        items,
+        url=browser_session.collection_url(
+            str(collection.get("id") or ""), username=args.username, origin=args.origin
+        ),
+        source=f"browser-session:{source}",
+    )
+    if args.output:
+        output = Path(args.output).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(inventory, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        log(f"wrote {output} ({len(items)} posts, source={source})")
+    print(json.dumps(inventory, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_sync(
+    items: list[dict],
+    output_dir: Path,
+    state_file: Path | None,
+    args: argparse.Namespace,
+    source_label: str,
+) -> tuple[int, dict]:
+    """Sync one collection's items and return ``(exit_code, summary)``."""
+    media_by_url = {browser_session.item_page_url(item): item for item in items}
+    discovered = [
+        ("instagram", browser_session.item_shortcode(item), browser_session.item_page_url(item))
+        for item in items
+    ]
+    if not args.include_photos:
+        discovered = [
+            entry
+            for entry in discovered
+            if any(
+                part["kind"] == "video"
+                for part in browser_session.item_media(media_by_url[entry[2]])
+            )
+        ]
+    output_dir = Path(output_dir).expanduser()
+    if state_file is None:
+        state_file = output_dir / "sync-state.json"
+    buffer = io.StringIO()
+    stats: dict[str, int] = {"via_session": 0, "via_ytdlp": 0}
+    code = sync_common.sync_items(
+        discovered,
+        output_dir=output_dir,
+        state_file=state_file,
+        downloader=DOWNLOADER,
+        download_fn=make_session_downloader(
+            media_by_url,
+            prefer_ytdlp=args.prefer_yt_dlp,
+            allow_ytdlp_fallback=not args.no_yt_dlp_fallback,
+            stats=stats,
+        ),
+        source_label=source_label,
+        retry_failed=not args.no_retry_failed,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        stream=buffer,
+        jobs=args.jobs,
+    )
+    try:
+        summary = json.loads(buffer.getvalue() or "{}")
+    except json.JSONDecodeError:
+        summary = {}
+    summary.update(stats)
+    if summary.get("via_ytdlp"):
+        log(
+            f"note: {summary['via_ytdlp']} item(s) went through yt-dlp; those are slow "
+            "because each one needs a full extractor pass. Use --no-yt-dlp-fallback to "
+            "see them as failures instead."
+        )
+    return code, summary
+
+
+def command_sync(args: argparse.Namespace) -> int:
+    if not args.collection and not args.all_collections:
+        print("error: pass --collection <id|name> or --all-collections", file=sys.stderr)
+        return 2
+    if args.collection and not args.output_dir:
+        print("error: --output-dir is required with --collection", file=sys.stderr)
+        return 2
+
+    with open_session(args) as session:
+        args.username = resolve_username(session, args)
+        if not args.all_collections:
+            collection = resolve_collection(session, args.collection, args)
+            items, source = enumerate_items(session, collection, args)
+            if not items:
+                print("error: no items were discovered for this collection", file=sys.stderr)
+                return 2
+            log(
+                f"syncing {len(items)} item(s) into {Path(args.output_dir).expanduser()} "
+                f"(source={source}, direct={'no' if args.prefer_yt_dlp else 'yes'})"
+            )
+            code, summary = run_sync(
+                items,
+                args.output_dir,
+                args.state_file,
+                args,
+                source_label=browser_session.collection_url(
+                    str(collection.get("id") or ""), username=args.username, origin=args.origin
+                ),
+            )
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return code
+
+        root = Path(args.output_root).expanduser()
+        existing = collections_from_state(root)
+        live: list[dict] = []
+        live_error = ""
+        try:
+            live, source = list_collections(session, args)
+        except SessionError as exc:
+            live_error = str(exc)
+        if existing:
+            known = {str(item.get("id")) for item in existing}
+            fresh = [
+                item
+                for item in live
+                if item.get("id") and str(item.get("id")) not in known
+            ]
+            collections = existing + fresh
+            log(
+                f"collections: {len(existing)} from existing folders in {root}"
+                + (f", {len(fresh)} newly listed on Instagram" if fresh else "")
+            )
+            if live_error:
+                log(f"note: Instagram did not list collections live ({live_error})")
+        elif live:
+            collections = live
+        else:
+            log(f"warning: {live_error or 'no collections were listed'}")
+            log(
+                "falling back to the whole saved list as one collection; "
+                "use `diagnose` to see what the page actually requested"
+            )
+            collections = [{"id": "", "name": "全部收藏", "url": browser_session.collection_url(
+                None, username=args.username, origin=args.origin
+            )}]
+        labelled = [
+            {
+                "name": str(collection.get("name") or collection.get("id")),
+                "url": str(collection.get("url") or "") or browser_session.collection_url(
+                    str(collection.get("id") or ""), username=args.username, origin=args.origin
+                ),
+                "id": collection.get("id"),
+            }
+            for collection in collections
+        ]
+        directories = sync_common.assign_directories(labelled)
+        totals = {
+            "collections": len(collections),
+            "downloaded": 0,
+            "failed": 0,
+            "skipped": 0,
+            "via_session": 0,
+            "via_ytdlp": 0,
+        }
+        errors = 0
+        for collection, directory in zip(collections, directories):
+            log(f"--- {collection.get('name')} -> {root / directory}")
+            try:
+                items, source = enumerate_items(session, collection, args)
+            except (SessionError, cdp.CdpError) as exc:
+                log(f"skipping {collection.get('name')}: {exc}")
+                errors += 1
+                continue
+            if not items:
+                totals["skipped"] += 1
+                continue
+            code, summary = run_sync(
+                items,
+                root / directory,
+                None,
+                args,
+                source_label=browser_session.collection_url(
+                    str(collection.get("id") or ""), username=args.username, origin=args.origin
+                ),
+            )
+            totals["downloaded"] += int(summary.get("downloaded", 0))
+            totals["failed"] += int(summary.get("failed", 0))
+            totals["via_session"] += int(summary.get("via_session", 0))
+            totals["via_ytdlp"] += int(summary.get("via_ytdlp", 0))
+            if code:
+                errors += 1
+        totals["output_root"] = str(root)
+        totals["errors"] = errors
+        print(json.dumps(totals, ensure_ascii=False, indent=2))
+        return 2 if errors else 0
+
+
+# --------------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------------
+
+
+def add_session_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="DevTools endpoint")
+    parser.add_argument(
+        "--origin",
+        default=INSTAGRAM_ORIGIN,
+        help="page origin used for in-page API calls (advanced/testing)",
+    )
+    parser.add_argument("--timeout", type=float, default=60.0, help="CDP timeout in seconds")
+    parser.add_argument(
+        "--launch",
+        action="store_true",
+        help="start the browser automatically when nothing is listening",
+    )
+    parser.add_argument(
+        "--browser", help="browser executable (default: first Chromium build found)"
+    )
+    parser.add_argument("--port", type=int, default=9222, help="debug port for --launch")
+    parser.add_argument(
+        "--profile-dir",
+        default=str(DEFAULT_PROFILE_DIR),
+        help="dedicated profile directory used by --launch",
+    )
+    parser.add_argument(
+        "--username",
+        default="",
+        help="account name used to build saved-collection URLs",
+    )
+
+
+def add_capture_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags for reading the page's own API traffic (used by more than `sync`)."""
+    parser.add_argument(
+        "--capture",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="read the JSON the page fetches for itself when a REST endpoint is retired",
+    )
+    parser.add_argument(
+        "--scroll-rounds",
+        type=int,
+        default=60,
+        help="scroll rounds for page capture (stops early once the feed settles)",
+    )
+    parser.add_argument("--scroll-delay-ms", type=int, default=900)
+
+
+def add_enumeration_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--max-items", type=int, default=5000)
+    parser.add_argument("--delay-ms", type=int, default=400, help="pause between API pages")
+    add_capture_arguments(parser)
+    parser.add_argument(
+        "--dom-fallback",
+        action="store_true",
+        help="scroll the rendered page for post links when no route returns media",
+    )
+    parser.add_argument("--dom-rounds", type=int, default=60)
+    parser.add_argument("--dom-delay-ms", type=int, default=1200)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Sync Instagram saved collections through a live browser session"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    check = subparsers.add_parser("check", help="report login state and collections")
+    add_session_arguments(check)
+    add_capture_arguments(check)
+    check.add_argument("--max-items", type=int, default=5000)
+    check.add_argument("--delay-ms", type=int, default=400)
+    check.set_defaults(func=command_check)
+
+    launch = subparsers.add_parser("launch", help="start the dedicated debug browser")
+    launch.add_argument("--browser")
+    launch.add_argument("--port", type=int, default=9222)
+    launch.add_argument("--profile-dir", default=str(DEFAULT_PROFILE_DIR))
+    launch.set_defaults(func=command_launch)
+
+    collections = subparsers.add_parser("collections", help="list saved collections")
+    add_session_arguments(collections)
+    add_capture_arguments(collections)
+    collections.add_argument("--max-items", type=int, default=5000)
+    collections.add_argument("--delay-ms", type=int, default=400)
+    collections.add_argument("--json", action="store_true")
+    collections.set_defaults(func=command_collections)
+
+    repair = subparsers.add_parser(
+        "repair",
+        help="find downloads macOS players cannot open and forget them for re-sync",
+    )
+    repair.add_argument("--output-root", type=Path, default=Path("instagram-saved"))
+    repair.add_argument(
+        "--forget",
+        action="store_true",
+        help="drop those items from the sync state and park their files for re-download",
+    )
+    repair.add_argument(
+        "--clean",
+        action="store_true",
+        help="delete the parked originals once the refreshed files look right",
+    )
+    repair.set_defaults(func=command_repair)
+
+    diagnose = subparsers.add_parser(
+        "diagnose", help="report the API paths the saved page actually calls"
+    )
+    add_session_arguments(diagnose)
+    add_enumeration_arguments(diagnose)
+    diagnose.add_argument("--collection", help="also probe this collection id")
+    diagnose.set_defaults(func=command_diagnose)
+
+    inventory = subparsers.add_parser("inventory", help="write a collection inventory JSON")
+    add_session_arguments(inventory)
+    add_enumeration_arguments(inventory)
+    inventory.add_argument("--collection", required=True, help="collection id or name")
+    inventory.add_argument("--output", type=Path)
+    inventory.set_defaults(func=command_inventory)
+
+    sync = subparsers.add_parser("sync", help="download a collection incrementally")
+    add_session_arguments(sync)
+    add_enumeration_arguments(sync)
+    sync.add_argument("--collection", help="collection id or name")
+    sync.add_argument(
+        "--all-collections",
+        action="store_true",
+        help="sync every saved collection into its own folder under --output-root",
+    )
+    sync.add_argument("--output-dir", type=Path, help="target folder for a single collection")
+    sync.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("instagram-saved"),
+        help="root folder for --all-collections (default: ./instagram-saved)",
+    )
+    sync.add_argument("--state-file", type=Path)
+    sync.add_argument("--limit", type=int)
+    sync.add_argument("--dry-run", action="store_true")
+    sync.add_argument("--no-retry-failed", action="store_true")
+    sync.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        help="parallel media downloads (default: 4; signed CDN URLs are independent)",
+    )
+    sync.add_argument(
+        "--prefer-yt-dlp",
+        action="store_true",
+        help="use the old yt-dlp path for every item (A/B comparison)",
+    )
+    sync.add_argument(
+        "--no-yt-dlp-fallback",
+        action="store_true",
+        help="fail items that have no direct media URL instead of falling back to slow yt-dlp",
+    )
+    sync.add_argument(
+        "--include-photos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="keep image posts as well as videos (default: yes)",
+    )
+    sync.set_defaults(func=command_sync)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return int(args.func(args))
+    except (SessionError, cdp.CdpError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
