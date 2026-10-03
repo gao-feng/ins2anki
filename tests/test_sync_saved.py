@@ -265,6 +265,31 @@ class GenericSyncEngineTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("export_collection.js", stderr.getvalue())
 
+    def test_a_failure_that_wrote_nothing_leaves_no_folder_behind(self):
+        with tempfile.TemporaryDirectory() as raw:
+            output_dir = Path(raw) / "out"
+            output_dir.mkdir()
+            leftovers: list[Path] = []
+
+            def fake_download(_downloader, url, destination, _cookies, _browser):
+                # the real downloaders mkdir the landing directory before the
+                # first byte arrives; a dead post dies before writing anything
+                destination.mkdir(parents=True, exist_ok=True)
+                leftovers.append(destination)
+                return False, "ERROR: content is not available anymore"
+
+            code = self._run(
+                ["https://www.douyin.com/video/6961737553342991651"],
+                output_dir,
+                fake_download,
+            )
+            # a failing download fails the run, but leaves no empty folder
+            self.assertEqual(code, 2)
+            self.assertEqual(leftovers[0].name, "6961737553342991651")
+            self.assertFalse(leftovers[0].exists())
+            state = json.loads((output_dir / "sync-state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["items"]["6961737553342991651"]["status"], "failed")
+
     def test_short_links_are_resolved_before_normalizing(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

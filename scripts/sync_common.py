@@ -665,6 +665,16 @@ def sync_items(
         else:
             failed_count += 1
             item.update({"status": "failed", "error": detail[-4000:]})
+            # A failed download must not leave an empty folder behind: the
+            # downloader mkdirs the landing directory before the first byte,
+            # and an empty directory reads as a broken item in Finder for
+            # no reason. Anything the attempt did write stays — that is
+            # repair's business.
+            try:
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass
         write_json_atomic(state_file, state)
         done = completed_count + failed_count
         elapsed = time.monotonic() - started
