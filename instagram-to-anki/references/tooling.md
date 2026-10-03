@@ -30,20 +30,38 @@ Strategy selection:
 
 None of these platforms expose an enumerable favorites feed to `yt-dlp`.
 
-Preferred path (Instagram): reuse the logged-in browser through CDP instead of
-exporting cookies. `scripts/browser_sync.py launch` opens a dedicated profile
-once, `check` verifies the session, and `sync --all-collections` enumerates,
-downloads the signed CDN URLs directly, and writes the same layout as the
-yt-dlp path. No cookies, no Keychain prompts, no agent.
+Preferred path (all three platforms): reuse the logged-in browser through CDP
+instead of exporting cookies. `scripts/browser_sync.py launch` opens a dedicated
+profile once, `check` verifies the session, and `sync --all-collections`
+enumerates, downloads the signed CDN URLs directly, and writes the same layout
+as the yt-dlp path. No cookies, no Keychain prompts, no agent.
 
-Enumeration tries three routes in order: Instagram's REST feed, then the JSON
-the page fetches for itself (read off the CDP `Network` domain, which survives
-Instagram retiring a REST path such as `/api/v1/collections/list/`), then DOM
-link harvesting with yt-dlp as the media fallback. `scripts/browser_sync.py
-diagnose` prints the API paths the page actually called when none of them work.
+`scripts/favorites_sync.py` does the same for 小红书 and 抖音 收藏, which have no
+enumerable feed at all: it installs a harvest hook with
+`Page.addScriptToEvaluateOnNewDocument` *before* the favorites page loads, scrolls
+the page, and reads the JSON the page fetched for itself (note id plus
+`xsec_token` on Xiaohongshu, `play_addr`/`images` URLs on Douyin) out of
+`sessionStorage`. Both platforms also server-render their first page, so the same
+walker is run over the boot state.
 
-Fallback path: use `scripts/browser/export_collection.js` on the logged-in 收藏
-page to produce an inventory, then feed it to `sync_saved.py --urls-file` or
+A fresh `xsec_token` is what makes a Xiaohongshu note readable: measured on the
+same note, a token-bearing URL with **no** cookies returned the full image list,
+while the cookie-authenticated URL **without** a token returned an empty shell.
+That is why the session path needs neither `--cookies` nor
+`--cookies-from-browser`; the token is short lived, so re-harvest and re-run
+instead of reusing an older URL list.
+
+Enumeration for Instagram tries three routes in order: its REST feed, then the
+JSON the page fetches for itself (read off the CDP `Network` domain, which
+survives Instagram retiring a REST path such as `/api/v1/collections/list/`),
+then DOM link harvesting with yt-dlp as the media fallback.
+`scripts/browser_sync.py diagnose` (and `favorites_sync.py diagnose`) prints the
+API paths the page actually called when none of them work.
+
+Fallback path (no dedicated window): use `scripts/browser/export_collection.js`
+on the logged-in 收藏 page to produce an inventory — plus
+`scripts/browser/harvest_xhs_tokens.js` for the `xsec_token` values Xiaohongshu
+note links need — then feed it to `sync_saved.py --urls-file` or
 `sync_collections.py --inventory`.
 
 ## Local transcription

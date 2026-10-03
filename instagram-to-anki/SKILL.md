@@ -21,21 +21,30 @@ Source content may be copyrighted or private. Download only content the user is 
 
 ### Incrementally sync a saved collection
 
-When the user asks to mirror a saved collection or 收藏夹 locally, run
-`scripts/sync_saved.py` with `--output-dir` plus either `--urls-file` or, for
-Instagram only, `--collection-url`. For private content, prefer
-`--cookies-from-browser BROWSER` so credentials remain in the browser profile.
-The sync command records `sync-state.json`, validates completed media before
-skipping it, downloads only newly discovered or incomplete posts, and retries
-failed posts on later runs. Use `--dry-run` for discovery without downloads.
+When the user asks to mirror a saved collection or 收藏夹 locally, prefer the
+one-command session path: `scripts/favorites_sync.py sync --platform
+xiaohongshu|douyin --output-dir DIR` (add `--folder NAME` for one 收藏夹). It
+reuses the dedicated browser profile, harvests the list from the page the user is
+already logged into, and needs no cookies. The first run is
+`favorites_sync.py launch` so the user can log in once in that window.
+
+Otherwise run `scripts/sync_saved.py` with `--output-dir` plus either
+`--urls-file` or, for Instagram only, `--collection-url`. For private content,
+prefer `--cookies-from-browser BROWSER` so credentials remain in the browser
+profile. The sync command records `sync-state.json`, validates completed media
+before skipping it, downloads only newly discovered or incomplete posts, and
+retries failed posts on later runs. Use `--dry-run` for discovery without
+downloads, and `diagnose` to print the API paths the page actually called when a
+harvest comes back empty.
 
 `yt-dlp` cannot enumerate Xiaohongshu or Douyin favorites — it only addresses
-single items (`/explore/<id>`, `/video/<id>`). For those platforms, ask the user
-to open the 收藏 page in their logged-in browser, run
-`scripts/browser/export_collection.js` in the console, and pass the exported
-`posts` array via `--urls-file`. The exporter auto-scrolls, preserves
-Xiaohongshu `xsec_token` parameters, and accumulates collections in
-`localStorage` so it can be run once per 收藏夹. Never fabricate a favorites
+single items (`/explore/<id>`, `/video/<id>`). If the session path is not
+available, ask the user to open the 收藏 page in their logged-in browser, run
+`scripts/browser/export_collection.js` in the console (plus
+`scripts/browser/harvest_xhs_tokens.js`, which supplies the `xsec_token` that
+Xiaohongshu note links require), and pass the exported `posts` array via
+`--urls-file`. The exporters auto-scroll and accumulate collections in
+`localStorage` so they can be run once per 收藏夹. Never fabricate a favorites
 list: if the user cannot export one, say so instead of guessing URLs.
 
 Collection sync only downloads authorized source media. It does not imply
@@ -44,11 +53,14 @@ before importing any synchronized post into Anki.
 
 Platform limitations to report honestly:
 
-- Douyin image notes (`/note/<id>`) are unsupported: `yt-dlp` exposes only a
-  video cover, which is not the note content. They are marked `failed` with an
-  explicit reason.
+- Douyin image notes (`/note/<id>`) are unsupported along the `yt-dlp` path:
+  `yt-dlp` exposes only a video cover, which is not the note content. They are
+  marked `failed` with an explicit reason. The `favorites_sync.py` session path
+  downloads them from the image URLs the page itself received.
 - Xiaohongshu image notes (图文) are supported and downloaded as their full
-  image list.
+  image list. Their note URLs need a fresh `xsec_token`; a cookie-authenticated
+  URL without one returns an empty shell, so re-harvest rather than reusing an
+  old URL list.
 
 For all-collection sync, inspect the user's logged-in Saved UI with the
 available browser tool, or have the user run the console exporter. Enumerate
