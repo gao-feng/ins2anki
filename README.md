@@ -1,4 +1,4 @@
-# ins2anki
+# saved-sync
 
 An [opencode](https://opencode.ai) skill that turns a short-video post or reel into Anki vocabulary flashcards. It downloads the media, transcribes spoken English (or reads the caption), surfaces genuinely challenging words, and — after you confirm the selection — imports them through AnkiConnect as Basic notes with detailed Chinese meanings, IPA, local TTS pronunciation, and the original source media.
 
@@ -15,7 +15,7 @@ Supported sources: **Instagram** posts/reels and saved collections, **Xiaohongsh
 ## Repository layout
 
 ```
-ins2anki/
+saved-sync/
   README.md
   同步收藏夹.command           # 双击：Instagram 收藏夹 → instagram-saved/
   同步小红书收藏.command       # 双击：小红书/抖音 收藏 → xhs-saved/ …
