@@ -39,6 +39,56 @@ SYNC_COMMON = load("sync_common")
 BROWSER_SYNC = load("browser_sync")
 
 
+class PartialFileTest(unittest.TestCase):
+    """Interrupted runs leave *.part behind; they must never be resumed blindly."""
+
+    def test_find_partials_covers_the_shapes_yt_dlp_leaves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "instagram-saved"
+            (root / "fun" / "DX4a7cvOM4J").mkdir(parents=True)
+            (root / "fun" / "DX4a7cvOM4J" / "DX4a7cvOM4J_Video.fdash-999v.mp4.part").write_bytes(b"x" * 10)
+            (root / "fun" / "DYRCqO1mca2").mkdir(parents=True)
+            (root / "fun" / "DYRCqO1mca2" / "clip.mp4.ytdl").write_bytes(b"y" * 5)
+            (root / "fun" / "DYRCqO1mca2" / "clip.mp4").write_bytes(b"z" * 5)
+            found = BROWSER_SYNC.find_partials(root)
+        self.assertEqual(
+            sorted(path.name for path in found),
+            ["DX4a7cvOM4J_Video.fdash-999v.mp4.part", "clip.mp4.ytdl"],
+        )
+
+    def test_repair_parts_reports_then_deletes_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "instagram-saved"
+            item_dir = root / "英语" / "DAbc123"
+            item_dir.mkdir(parents=True)
+            partial = item_dir / "DAbc123.mp4.part"
+            partial.write_bytes(b"x" * 2048)
+            (root / "英语" / "sync-state.json").write_text(
+                json.dumps({"source": "https://www.instagram.com/demo_user/saved/_/1/", "items": {}}),
+                encoding="utf-8",
+            )
+
+            report = StringIO()
+            with redirect_stdout(report):
+                self.assertEqual(
+                    BROWSER_SYNC.command_repair(argparse.Namespace(output_root=root, forget=False)), 0
+                )
+            payload = json.loads(report.getvalue())
+            self.assertEqual(payload["partial_files"], 1)
+            self.assertEqual(payload["partial_mib"], 0.0)
+            self.assertTrue(partial.is_file())
+
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    BROWSER_SYNC.command_repair(
+                        argparse.Namespace(output_root=root, forget=False, parts=True)
+                    ),
+                    0,
+                )
+            self.assertFalse(partial.exists())
+            self.assertTrue(item_dir.is_dir())
+
+
 class YtDlpFormatTest(unittest.TestCase):
     def test_selector_prefers_h264_then_mp4(self):
         selector = DOWNLOAD.AVC_FIRST_FORMAT
@@ -141,7 +191,8 @@ class RepairTest(unittest.TestCase):
             self.assertEqual(sorted(state["items"]), ["Dh264", "Dpending"])
             self.assertEqual(state["items"]["Dh264"]["status"], "completed")
 
-    def test_clean_removes_the_parked_originals(self):
+    def test_clean_keeps_originals_until_a_playable_replacement_exists(self):
+        """The destructive step must never outrun the re-download."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "instagram-saved"
             self.seed(root)
@@ -149,13 +200,35 @@ class RepairTest(unittest.TestCase):
             out = StringIO()
             with with_fake_probe(), redirect_stdout(out):
                 BROWSER_SYNC.command_repair(args)
-            self.assertTrue((root / "自然" / "Dvp9.unplayable").is_dir())
+            backup = root / "自然" / "Dvp9.unplayable"
+            self.assertTrue(backup.is_dir())
+
+            # nothing has been re-downloaded yet: the original must survive
             clean_args = argparse.Namespace(output_root=root, clean=True)
             out = StringIO()
-            with redirect_stdout(out):
+            with mock.patch.object(BROWSER_SYNC, "probe_video_codec", by_name), redirect_stdout(out):
                 BROWSER_SYNC.command_repair(clean_args)
-            self.assertEqual(json.loads(out.getvalue())["removed"], 2)
-            self.assertFalse((root / "自然" / "Dvp9.unplayable").exists())
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["removed"], 0)
+            self.assertEqual(payload["kept"], 2)
+            self.assertTrue(backup.is_dir())
+
+            # simulate the refresh: item completed again, now H.264 on disk
+            state_file = root / "自然" / "sync-state.json"
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            replacement = root / "自然" / "Dvp9"
+            replacement.mkdir()
+            (replacement / "Drefreshed_h264.mp4").write_bytes(b"\x00" * 16)
+            state["items"]["Dvp9"] = {"status": "completed", "output_dir": str(replacement)}
+            state_file.write_text(json.dumps(state), encoding="utf-8")
+
+            out = StringIO()
+            with mock.patch.object(BROWSER_SYNC, "probe_video_codec", by_name), redirect_stdout(out):
+                BROWSER_SYNC.command_repair(clean_args)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["removed"], 1)
+            self.assertEqual(payload["kept"], 1)  # 英语/Dalso-vp9 was never refreshed
+            self.assertFalse(backup.exists())
             self.assertTrue((root / "自然" / "Dh264").is_dir())
 
     def test_refuses_to_delete_outside_the_root(self):

@@ -24,8 +24,10 @@ instagram-to-anki/
     download_media.py         # multi-platform downloader + manifest writer
     sync_saved.py             # incremental sync CLI (--platform)
     sync_collections.py       # multi-collection inventory coordinator
+    favorites_sync.py         # one command: 小红书/抖音 收藏 sync via a browser session
     browser/
       export_collection.js    # console script: export a 收藏夹 to inventory JSON
+      harvest_xhs_tokens.js   # console script: harvest note id -> xsec_token
     download_instagram.py     # thin Instagram wrapper (compatibility)
     sync_instagram_saved.py   # thin Instagram wrapper (compatibility)
     sync_instagram_collections.py # thin Instagram wrapper (compatibility)
@@ -120,18 +122,44 @@ python3 instagram-to-anki/scripts/browser_sync.py sync \
 现在的会话路径拿到的是 Instagram 自己的渐进式 `video_versions`（H.264 + AAC），双击就能播；
 yt-dlp 回退路径也已固定为 `--format 'bv*[vcodec^=avc1]+ba[acodec^=mp4a]/…' --merge-output-format mp4`。
 
-刷新历史文件（重新从 Instagram 取 H.264，无损，比本地转码快）：
+刷新历史文件（重新从 Instagram 取 H.264，无损，比本地转码快）。**四步必须按顺序做，第 3 步不能跳过**：
 
 ```bash
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved           # 只报告
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --forget  # 记为待重下
-# 然后双击 同步收藏夹.command（或跑一次 sync --all-collections）
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved           # 期望 unplayable: 0
-python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --clean    # 删掉备份
+# 1) 体检：只报告，不动文件
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved
+
+# 2) 记为待重下：把条目目录改名为 <短码>.unplayable/ 并从 sync state 移除（不删文件）
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --forget
+
+# 3) 重新下载（不能跳过！）——双击 同步收藏夹.command，或：
+python3 instagram-to-anki/scripts/browser_sync.py sync --all-collections --launch --output-root instagram-saved
+
+# 4) 确认刷新完成后再删备份（只报告：期望 unplayable: 0）
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --clean
 ```
 
-`--forget` **不删除**原文件：它把条目目录改名为 `<短码>.unplayable/` 并从 sync state 中移除，
-所以即使那条帖子已被删除，原件仍在磁盘上可恢复。
+第 2 步**不删除**原文件，只改名，所以原字节一直在磁盘上。第 4 步的 `--clean` 也**只删除已经确认被重下替代的原件**：
+它逐条检查 sync state 里该条目是否已 `completed`、且目录里是否已有可播放（H.264/HEVC）文件；
+只要无法确认，就保留原文件并打印 `kept N original(s)`。所以即使误跑 `--clean`，也不会丢掉还没重下的东西。
+
+跳过的条目（例如 `--forget` 之后没跑同步）不会丢：它们已不在 sync state 中，下次同步会被当作新条目重新发现并下载。
+
+#### 没下完的条目与残留的 .part
+
+中断的下载会留下 `*.part` / `*.ytdl`（yt-dlp 的 DASH 流尤其明显，形如
+`..._Video by user.fdash-123v.mp4.part`：那是纯视频流，所以没有声音）。这些残留**不能**被续传成完整视频，
+正确做法是让同步重新下载——这类条目没有 `manifest.json`，会被自动判定为未完成并重新抓取。
+
+```bash
+# 体检：报告不可播放（VP9）条目 + 残留分片
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved
+# 删除残留分片（回收空间）
+python3 instagram-to-anki/scripts/browser_sync.py repair --output-root instagram-saved --parts
+```
+
+下载器也不会盲信同名 `.part`：如果它比真实资源还长（来自别的工具或别的流），会丢弃重下，
+而不是把不同来源的字节拼在一起。
 
 #### 网络抖动会自动重试
 
@@ -210,14 +238,52 @@ The older entry points `sync_instagram_saved.py` and
 Use `--dry-run` to update discovery state and display pending URLs without
 downloading. Do not share cookie files or downloaded private media.
 
-### Incrementally sync Xiaohongshu and Douyin favorites (收藏夹)
+### 一键同步小红书 / 抖音收藏（推荐，不需要 cookie）
 
-`yt-dlp` only addresses single items on these platforms — `XiaoHongShu` matches
-`/explore/<id>` and `/discovery/item/<id>`, `Douyin` matches `/video/<id>` — so a
-收藏夹 cannot be enumerated from the command line. Export it from the browser
-you are already logged into.
+双击仓库根目录的 [同步小红书收藏.command](<同步小红书收藏.command>) 即可。首次运行会打开一个
+**专用浏览器窗口**（profile 在 `~/.ins2anki/browser-profile`，与你平时的 Edge/Chrome 互不影响），
+在里面登录一次小红书；之后每次双击都只做增量同步，已下载的自动跳过，文件写到
+`xhs-saved/收藏/`。抖音把环境变量 `INS2ANKI_PLATFORM=douyin` 换一下即可。
 
-1. Open the favorites page:
+命令行等价形式：
+
+```bash
+python3 instagram-to-anki/scripts/favorites_sync.py launch   # 一次性：打开专用浏览器并登录
+python3 instagram-to-anki/scripts/favorites_sync.py check    # 确认登录并看抓到多少条
+python3 instagram-to-anki/scripts/favorites_sync.py sync \
+  --platform xiaohongshu --output-dir xhs-saved/收藏 --jobs 4
+```
+
+只同步某一个收藏夹（侧栏里的名字）：加 `--folder 英语`。
+补充开关：`--limit 5` 先试水、`--dry-run` 只列不下载、`--no-retry-failed` 跳过失败项、
+`diagnose` 打印页面实际调用了哪些接口（一条都抓不到时先看它）。
+
+这条路不导出、不读取 cookie，因此**不会触发 macOS 钥匙串的"访问机密信息"授权弹窗**。
+做法是复用 [browser_sync.py](instagram-to-anki/scripts/browser_sync.py) 那一套浏览器会话：
+在收藏页**加载之前**注入一个抓取钩子（[favorites_sync.py](instagram-to-anki/scripts/favorites_sync.py)），
+让它自己滚动列表，把页面自己请求到的 JSON 收集起来——小红书笔记的 `xsec_token`、抖音条目的
+视频/图片直链都在里面——再交给共用的增量引擎下载。
+
+> 为什么 token 比 cookie 重要：小红书的笔记链接必须带一个新鲜的 `xsec_token` 才能打开。
+> 实测**带着浏览器 cookie 但没有 token 的链接只会返回一个空壳**（没有格式、没有图片），
+> 而**带 token、不带任何 cookie 的链接可以完整下载**。所以这条路全程不需要 cookie。
+
+#### 抓不到东西时
+
+```bash
+python3 instagram-to-anki/scripts/favorites_sync.py diagnose --platform xiaohongshu
+```
+
+- `notes_with_token: 0`：窗口里没登录，或收藏页还没渲染完（加大 `--scroll-rounds`）
+- 有 `api_paths_called` 但条目为 0：解析规则没覆盖这种返回，把 `api_paths_called` 发我即可
+- 收藏夹是自定义文件夹：用 `--folder <侧栏名字>`，或先用 `check` 看 `folders` 列表
+
+#### 回退路径：浏览器控制台导出（不想开专用窗口时）
+
+`yt-dlp` 在这两个平台上只认单条（`/explore/<id>`、`/video/<id>`），收藏夹列表只能来自
+已登录的页面：
+
+1. 打开收藏页：
 
    | Platform | Page |
    | --- | --- |
@@ -225,38 +291,32 @@ you are already logged into.
    | Douyin | `https://www.douyin.com/user/self?showTab=collection` |
    | Instagram | `https://www.instagram.com/<user>/saved/<collection-id>/` |
 
-2. Open the browser console and paste [`scripts/browser/export_collection.js`](instagram-to-anki/scripts/browser/export_collection.js).
-   It auto-scrolls until no new links appear, merges the result into
-   `localStorage`, then logs, copies and downloads `favorites-inventory.json`.
-   Run it once per 收藏夹 — results accumulate. To name a collection explicitly,
-   set `window.__FAVORITES_NAME = "英语"` before running.
+2. 打开浏览器控制台，粘贴 [export_collection.js](instagram-to-anki/scripts/browser/export_collection.js)。
+   它会自动滚到底、把结果累积进 `localStorage`，然后打印、复制并下载 `favorites-inventory.json`。
+   每切一个收藏夹跑一次；想显式命名就先 `window.__FAVORITES_NAME = "英语"`。
+   小红书还要再粘贴一次 [harvest_xhs_tokens.js](instagram-to-anki/scripts/browser/harvest_xhs_tokens.js)
+   补齐 `xsec_token`（收藏页的 `<a href>` 里不带 token）。
 
-3. Sync one collection incrementally:
+3. 用清单下载（`jq -r '.collections[0].posts[]'` 可取出某一份列表）：
 
    ```bash
    python instagram-to-anki/scripts/sync_saved.py \
      --urls-file collection-urls.txt \
      --platform xiaohongshu \
-     --cookies-from-browser chrome \
      --output-dir xhs-saved/英语
    ```
 
-   `--urls-file` takes one post URL per line (`jq -r '.collections[0].posts[]'`
-   extracts a list). `--platform` may be omitted to detect each URL, but both
-   platforms require cookies. Short links (`xhslink.com`, `v.douyin.com`) are
-   resolved automatically.
+   没有 token 的链接会失败，请先补齐；短链（`xhslink.com`、`v.douyin.com`）会自动解析。
 
-4. Or sync every collection in the exported inventory at once — each gets its
-   own directory and its own incremental state:
+4. 或者一次同步清单里的每个收藏夹（各自一个目录、各自一份增量状态）：
 
    ```bash
    python instagram-to-anki/scripts/sync_collections.py \
      --inventory favorites-inventory.json \
-     --cookies-from-browser chrome \
      --output-dir saved
    ```
 
-   Re-export the inventory and re-run to download only new posts.
+   重新导出清单再跑一次，只会下载新增条目。
 
 ### Mirror multiple saved collections
 
@@ -295,6 +355,6 @@ missing posts.
 
 - Download only content you are authorized to access; do not bypass access controls or redistribute fetched media.
 - The importer never reports success unless AnkiConnect returns `addedNoteIds` for every requested note; duplicate or partial failures are reported verbatim, not silently retried.
-- Xiaohongshu image notes (图文) are downloaded as their full image list. Douyin image notes (`/note/<id>`) are **not** supported: `yt-dlp` exposes only a video cover for them, so they are marked `failed` with an explicit reason instead of being saved as a single cover image.
+- Xiaohongshu image notes (图文) are downloaded as their full image list. Along the `yt-dlp` path Douyin image notes (`/note/<id>`) are **not** supported — `yt-dlp` exposes only a video cover, so they are marked `failed` with an explicit reason instead of being saved as a single cover. The `favorites_sync.py` session path downloads them from the image URLs the page itself received.
 - Item state (`sync-state.json`) is per output directory. An item counts as completed only while its manifest still references a non-empty media file; if the media is deleted, the next run re-downloads it.
 - After editing any skill file, restart opencode so the change takes effect.

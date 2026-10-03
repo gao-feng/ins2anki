@@ -380,6 +380,25 @@ PLAYABLE_VIDEO_CODECS = frozenset(
 )
 VIDEO_SUFFIXES = (".mp4", ".m4v", ".mov")
 BACKUP_SUFFIX = ".unplayable"
+#: Junk left behind by an interrupted download, yt-dlp included.
+PARTIAL_SUFFIXES = (".part", ".ytdl", ".temp", ".part-frag")
+
+
+def find_partials(root: Path) -> list[Path]:
+    """List leftover partial files (``*.part``, ``*.ytdl``) under ``root``."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    found = [
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and (
+            path.name.endswith(PARTIAL_SUFFIXES)
+            or ".part-" in path.name
+        )
+    ]
+    return sorted(found)
 
 
 def probe_video_codec(path: Path, exe: str | None = None) -> str | None:
@@ -442,7 +461,7 @@ def find_unplayable(root: Path, probe=probe_video_codec) -> list[dict]:
 
 
 def command_repair(args: argparse.Namespace) -> int:
-    """Report (or forget) downloads that macOS players cannot open."""
+    """Tidy an output tree: unplayable files, leftover partials, backups."""
     if getattr(args, "clean", False):
         return command_clean(args)
     root = Path(args.output_root).expanduser().resolve()
@@ -452,17 +471,42 @@ def command_repair(args: argparse.Namespace) -> int:
     if not shutil.which("ffprobe"):
         log("note: ffprobe not found; install ffmpeg to detect codecs")
     findings = find_unplayable(root)
+    partials = find_partials(root)
+    partial_bytes = sum(path.stat().st_size for path in partials)
     by_codec: dict[str, int] = {}
     for finding in findings:
         by_codec[finding["codec"]] = by_codec.get(finding["codec"], 0) + 1
+
+    if getattr(args, "parts", False) and partials:
+        removed = 0
+        for path in partials:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root):
+                log(f"refusing to delete {resolved} (outside {root})")
+                continue
+            try:
+                resolved.unlink()
+                removed += 1
+            except OSError as exc:
+                log(f"could not remove {resolved}: {exc}")
+        log(f"removed {removed} partial file(s), {partial_bytes / 1048576:.1f} MiB")
+
     if not findings:
-        print(json.dumps({"root": str(root), "unplayable": 0}, ensure_ascii=False, indent=2))
+        print(json.dumps({
+            "root": str(root),
+            "unplayable": 0,
+            "partial_files": len(partials),
+            "partial_mib": round(partial_bytes / 1048576, 1),
+            "kept": "run with --parts to delete partial files",
+        }, ensure_ascii=False, indent=2))
         return 0
     if not args.forget:
         print(json.dumps({
             "root": str(root),
             "unplayable": len(findings),
             "by_codec": by_codec,
+            "partial_files": len(partials),
+            "partial_mib": round(partial_bytes / 1048576, 1),
             "items": sorted({finding["id"] for finding in findings}),
             "next": [
                 "rerun with --forget to drop these items from the sync state",
@@ -519,19 +563,57 @@ def command_repair(args: argparse.Namespace) -> int:
     return 0
 
 
+def playable_media(directory: Path) -> bool:
+    """Report whether a folder already holds a video macOS players can open."""
+    if not directory.is_dir():
+        return False
+    for media in sorted(directory.iterdir()):
+        if not media.is_file() or media.suffix.lower() not in VIDEO_SUFFIXES:
+            continue
+        codec = probe_video_codec(media)
+        if codec and codec.casefold() in PLAYABLE_VIDEO_CODECS:
+            return True
+    return False
+
+
 def command_clean(args: argparse.Namespace) -> int:
-    """Remove the ``*.vp9`` backups left behind by a repair run."""
+    """Delete parked originals **only** once a playable replacement exists.
+
+    Deleting the backup before the re-download has actually landed would destroy
+    the only local copy on the strength of an intention, so every candidate is
+    checked against the sync state first and kept when it cannot be verified.
+    """
     root = Path(args.output_root).expanduser().resolve()
     removed: list[str] = []
+    kept: list[str] = []
     for backup in sorted(root.glob(f"*/**/*{BACKUP_SUFFIX}*")):
         if not backup.is_dir() or not backup.is_relative_to(root):
+            continue
+        item_id = backup.name.split(BACKUP_SUFFIX)[0]
+        state_file = backup.parent / "sync-state.json"
+        entry: dict = {}
+        try:
+            entry = (json.loads(state_file.read_text(encoding="utf-8")).get("items") or {}).get(item_id) or {}
+        except (OSError, json.JSONDecodeError):
+            entry = {}
+        directory = Path(str(entry.get("output_dir") or backup.parent / item_id))
+        if entry.get("status") != "completed" or not playable_media(directory):
+            kept.append(f"{backup.name}: no playable replacement yet")
             continue
         try:
             shutil.rmtree(backup)
             removed.append(str(backup))
         except OSError as exc:
             log(f"could not remove {backup}: {exc}")
-    print(json.dumps({"root": str(root), "removed": len(removed)}, ensure_ascii=False, indent=2))
+    if kept:
+        log(f"kept {len(kept)} original(s): {kept[0]}")
+    print(json.dumps({
+        "root": str(root),
+        "removed": len(removed),
+        "kept": len(kept),
+        "kept_items": kept[:20],
+        "note": "sync first: --clean only deletes originals that already have a playable replacement",
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -929,9 +1011,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="drop those items from the sync state and park their files for re-download",
     )
     repair.add_argument(
+        "--parts",
+        action="store_true",
+        help="delete leftover partial files (*.part, *.ytdl) from interrupted runs",
+    )
+    repair.add_argument(
         "--clean",
         action="store_true",
-        help="delete the parked originals once the refreshed files look right",
+        help="delete the parked originals once the refreshed files look fresh",
     )
     repair.set_defaults(func=command_repair)
 

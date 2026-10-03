@@ -654,6 +654,14 @@ def download_url(
                     ).partition("/")
                     if total.isdigit():
                         expected = int(total)
+                        if resume_from > expected:
+                            # a stale partial (an older tool, a different
+                            # stream) is longer than the real resource: start
+                            # over instead of gluing mismatched bytes together
+                            response.close()
+                            partial.unlink(missing_ok=True)
+                            time.sleep(_retry_delay(attempt, retry_base))
+                            continue
                 else:
                     length = response.headers.get("Content-Length")
                     if length and str(length).isdigit():
@@ -689,8 +697,8 @@ def download_url(
             time.sleep(_retry_delay(attempt, retry_base))
             continue
 
-        if expected is not None and written < expected:
-            last_error = f"truncated body: {written}/{expected} bytes"
+        if expected is not None and written != expected:
+            last_error = f"size mismatch: {written}/{expected} bytes"
             if attempt >= attempts:
                 partial.unlink(missing_ok=True)
                 raise SessionError(f"media download failed: {last_error}")

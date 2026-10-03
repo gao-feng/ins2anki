@@ -686,6 +686,19 @@ class DownloadResilienceTest(unittest.TestCase):
             self.assertGreaterEqual(mock_api.server.range_requests, 1)
             self.assertFalse(target.with_suffix(".mp4.part").exists())
 
+    def test_stale_oversized_partial_is_discarded_not_appended(self):
+        """A .part from another tool must never be glued onto a fresh body."""
+        with MockInstagram() as mock_api, tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "clip.mp4"
+            partial = target.with_suffix(".mp4.part")
+            partial.write_bytes(b"\x00" * (len(_Handler.media_bytes) + 1000))
+            size = BROWSER_SESSION.download_url(
+                f"{mock_api.origin}media/DAbc123_high.mp4", target, retry_base=0.01
+            )
+            self.assertEqual(size, len(_Handler.media_bytes))
+            self.assertEqual(target.read_bytes(), _Handler.media_bytes)
+            self.assertFalse(partial.exists())
+
     def test_persistent_truncation_eventually_fails_cleanly(self):
         with MockInstagram(flaky=99) as mock_api, tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "clip.mp4"
@@ -1009,6 +1022,22 @@ class BrowserIntegrationTest(unittest.TestCase):
             code, out, _err = self.run_cli([*argv, "--dry-run"])
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out)["pending"], 0)
+
+            # an item dropped from the state (repair --forget) is discovered
+            # again and downloaded once more, so the refresh always lands
+            state_file = output / "sync-state.json"
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            removed = state["items"].pop("DAbc123")
+            state_file.write_text(json.dumps(state), encoding="utf-8")
+            (output / "DAbc123" / "DAbc123_demo_user.mp4").unlink()
+            code, out, _err = self.run_cli([*argv, "--dry-run"])
+            self.assertEqual(code, 0)
+            pending = json.loads(out)
+            self.assertEqual(pending["pending"], 1)
+            self.assertEqual(pending["pending_urls"], [removed["url"]])
+            code, out, _err = self.run_cli(argv)
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["downloaded"], 1)
 
             # the account name was detected, so the state points at a real URL
             state = json.loads((output / "sync-state.json").read_text(encoding="utf-8"))

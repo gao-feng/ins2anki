@@ -273,8 +273,14 @@ def sync_items(
 
     if dry_run:
         print(json.dumps({
+            # keep the schema identical to a real run so callers can read the
+            # same keys whether or not they passed --dry-run
             "discovered": len(discovered),
             "pending": len(pending),
+            "attempted": 0,
+            "downloaded": 0,
+            "failed": 0,
+            "failures": [],
             "pending_urls": [url for _, _, url in pending],
             "state_file": str(state_file),
         }, ensure_ascii=False, indent=2), file=out)
