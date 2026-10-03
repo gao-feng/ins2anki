@@ -180,7 +180,10 @@ globalThis.__ins2anki = (() => {
     const response = await fetch(path, { credentials: "include", headers });
     const text = await response.text();
     if (!response.ok) {
-      const error = new Error(`HTTP ${response.status} for ${path}: ${text.slice(0, 300)}`);
+      // an HTML body is the SPA shell and carries no diagnostic value; a
+      // JSON body (rate limits, login walls) is worth keeping a prefix of
+      const summary = text.startsWith("<") ? "HTML shell" : text.slice(0, 160);
+      const error = new Error(`HTTP ${response.status} for ${path}: ${summary}`);
       error.status = response.status;
       throw error;
     }

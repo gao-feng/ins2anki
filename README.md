@@ -176,10 +176,14 @@ Instagram 的 CDN 经常在传输中途掐断连接（`SSL: UNEXPECTED_EOF_WHILE
 和 `fb_api_req_friendly_name`，手工重建会被回答一个 SPA 外壳，因此重放的是页面自己的字节。日志长这样：
 
 ```
-note: page JavaScript failed: Error: HTTP 404 for /api/v1/collections/list/: <!DOCTYPE html>...
+note: page JavaScript failed: Error: HTTP 404 for /api/v1/collections/list/: HTML shell
 reading the collections the saved page loads for itself ...
 page-query: 115 item(s) over 10 page(s) via PolarisSavedCollectionPageWWWQuery
 ```
+
+那条 `note` 不是故障：它只是说"先试了旧接口，404，改走页面自己的请求"。这个结论会被记进
+输出目录的 `.route-hints.json`，之后每次运行直接跳过死探测（不再打印 note），两周后才重试一次，
+万一 Instagram 恢复了这条路径还能自动用回去。
 
 完整顺序是 **页面查询重放 → 滚动抓取（`--no-replay` 跳过第一条）→ `--dom-fallback` 抓帖子链接（媒体走 yt-dlp）**。
 需要排查时用 `diagnose`，它会列出页面**实际**请求了哪些 API 路径、抓到几个响应、能解析出多少条目：

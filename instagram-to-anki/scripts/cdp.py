@@ -458,6 +458,8 @@ def _exception_message(details: dict) -> str:
         description = exception.get("description") or exception.get("value")
         if description:
             first_line = str(description).strip().splitlines()[0]
+            if len(first_line) > 240:
+                first_line = first_line[:237] + "..."
             return f"page JavaScript failed: {first_line}"
     text = details.get("text") or "unknown page JavaScript error"
     return f"page JavaScript failed: {text}"

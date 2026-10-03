@@ -12,6 +12,7 @@ Set ``INS2ANKI_SKIP_BROWSER_TESTS=1`` to skip the browser layer, or point
 ``INS2ANKI_TEST_BROWSER`` at a browser executable to override discovery.
 """
 
+import argparse
 import http.server
 import importlib.util
 import json
@@ -497,6 +498,96 @@ class ReplayHelperTest(unittest.TestCase):
         }}}}
         items = BROWSER_SESSION.extract_media([payload])
         self.assertEqual(sorted(item["code"] for item in items), ["DAbc123", "DDef456"])
+
+
+class _RetiringSession:
+    """An InstagramSession whose REST route 404s, counting the probes."""
+
+    def __init__(self):
+        self.probes = 0
+
+    def collections(self):
+        self.probes += 1
+        raise BROWSER_SESSION.SessionError(
+            "page JavaScript failed: HTTP 404 for /api/v1/collections/list/: HTML shell"
+        )
+
+    def collections_via_capture(self, username, rounds=2, delay_ms=10):
+        return [{"id": "1234567890123456", "name": "自然", "url": "u"}]
+
+
+class RouteHintTest(unittest.TestCase):
+    """A retired endpoint must not be probed (and logged) on every run."""
+
+    def _args(self):
+        return argparse.Namespace(
+            capture=True, scroll_rounds=2, scroll_delay_ms=10, username="demo_user"
+        )
+
+    def test_a_404_is_remembered_and_the_probe_is_skipped_next_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = _RetiringSession()
+            first, source = BROWSER_SYNC.list_collections(session, self._args(), root)
+            self.assertEqual(source, "browser-network")
+            self.assertEqual(len(first), 1)
+            self.assertEqual(session.probes, 1)
+            self.assertTrue((root / ".route-hints.json").is_file())
+
+            # the second run goes straight to the page: no probe, no note
+            err = StringIO()
+            with redirect_stderr(err):
+                second, source = BROWSER_SYNC.list_collections(session, self._args(), root)
+            self.assertEqual(source, "browser-network")
+            self.assertEqual(session.probes, 1)
+            self.assertNotIn("note:", err.getvalue())
+
+    def test_a_stale_hint_is_probed_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".route-hints.json").write_text(
+                json.dumps({"collections_list_retired": "2020-01-01T00:00:00"}),
+                encoding="utf-8",
+            )
+            session = _RetiringSession()
+            with redirect_stderr(StringIO()):
+                BROWSER_SYNC.list_collections(session, self._args(), root)
+            self.assertEqual(session.probes, 1)
+
+    def test_a_skipped_probe_is_still_explained_when_capture_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            session = _RetiringSession()
+
+            class _Broken(_RetiringSession):
+                def collections_via_capture(self, username, rounds=2, delay_ms=10):
+                    raise BROWSER_SESSION.SessionError("nothing loaded")
+
+            BROWSER_SYNC.remember_route(root, "collections_list_retired")
+            broken = _Broken()
+            with redirect_stderr(StringIO()), self.assertRaises(
+                BROWSER_SYNC.SessionError
+            ) as raised:
+                BROWSER_SYNC.list_collections(broken, self._args(), root)
+            self.assertIn("retired (remembered)", str(raised.exception))
+            self.assertEqual(broken.probes, 0)
+
+    def test_a_missing_root_is_not_created_just_to_park_a_hint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            absent = Path(tmp) / "not-there-yet"
+            BROWSER_SYNC.remember_route(absent, "collections_list_retired")
+            self.assertFalse(absent.exists())
+
+    def test_a_working_rest_route_wins_without_writing_hints(self):
+        class _Working(_RetiringSession):
+            def collections(self):
+                return [{"id": "1", "name": "自然", "url": "u"}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collections, source = BROWSER_SYNC.list_collections(_Working(), self._args(), root)
+            self.assertEqual(source, "api")
+            self.assertFalse((root / ".route-hints.json").exists())
 
 
 class _FakeSession:
@@ -1245,6 +1336,17 @@ class BrowserIntegrationTest(unittest.TestCase):
             # the account name was detected, so the state points at a real URL
             state = json.loads((output / "sync-state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["source"], f"{self.mock.origin}demo_user/saved/_/{_Handler.collection_id}/")
+
+    def test_the_retirement_note_is_one_clean_line(self):
+        with MockInstagram(rest=False) as mock_api, tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self.run_cli([
+                "sync", *self.session_argv(mock_api.origin), "--all-collections",
+                "--delay-ms", "10", "--output-root", tmp,
+            ])
+            self.assertEqual(code, 0, err)
+            self.assertIn("HTML shell", err)
+            self.assertNotIn("<!DOCTYPE", err)
+            self.assertNotIn("<html", err)
 
     def test_sync_all_collections_writes_one_folder_per_collection(self):
         with tempfile.TemporaryDirectory() as tmp:

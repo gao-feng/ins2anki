@@ -22,6 +22,7 @@ when nothing is listening yet.
 from __future__ import annotations
 
 import argparse
+import datetime
 import io
 import json
 import re
@@ -94,20 +95,76 @@ def resolve_username(session: InstagramSession, args: argparse.Namespace) -> str
     return username
 
 
-def list_collections(session: InstagramSession, args: argparse.Namespace) -> tuple[list[dict], str]:
-    """Return ``(collections, source)``, preferring REST then network capture."""
+ROUTE_HINTS_FILE = ".route-hints.json"
+#: a remembered retirement lives this long, then the route is probed again
+ROUTE_HINT_TTL = 14 * 24 * 3600
+
+
+def load_route_hints(root: Path | None) -> dict:
+    if root is None:
+        return {}
     try:
-        collections = session.collections()
-        if collections:
-            return collections, "api"
-        rest_error = "the collection-list endpoint returned nothing"
-    except (SessionError, cdp.CdpError) as exc:
-        rest_error = str(exc)
+        hints = json.loads((root / ROUTE_HINTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return hints if isinstance(hints, dict) else {}
+
+
+def remember_route(root: Path | None, route: str) -> None:
+    """Record that an endpoint answered 404, so later runs skip the probe.
+
+    A missing root is left alone: a read-only command such as ``check`` must
+    not create the output tree just to park a hint in it.
+    """
+    if root is None or not root.is_dir():
+        return
+    hints = load_route_hints(root)
+    hints[route] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    sync_common.write_json_atomic(root / ROUTE_HINTS_FILE, hints)
+
+
+def route_is_retired(hints: dict, route: str, ttl: float = ROUTE_HINT_TTL) -> bool:
+    stamp = str(hints.get(route) or "")
+    try:
+        moment = datetime.datetime.fromisoformat(stamp)
+    except ValueError:
+        return False
+    return 0 <= (datetime.datetime.now() - moment).total_seconds() < ttl
+
+
+def list_collections(
+    session: InstagramSession,
+    args: argparse.Namespace,
+    root: Path | None = None,
+) -> tuple[list[dict], str]:
+    """Return ``(collections, source)``, preferring REST then network capture.
+
+    A 404 from the collection-list route is remembered in ``root``: probing a
+    retired endpoint on every run buys a scary note and nothing else. The
+    memory expires after two weeks so a restored endpoint is picked back up,
+    and a failing capture still reports that the probe was skipped.
+    """
+    rest_error = ""
+    skipped = False
+    if route_is_retired(load_route_hints(root), "collections_list_retired"):
+        skipped = True
+        rest_error = "the collection-list route is retired (remembered)"
+    else:
+        try:
+            collections = session.collections()
+            if collections:
+                return collections, "api"
+            rest_error = "the collection-list endpoint returned nothing"
+        except (SessionError, cdp.CdpError) as exc:
+            rest_error = str(exc)
+            if "HTTP 404" in rest_error:
+                remember_route(root, "collections_list_retired")
     if not getattr(args, "capture", True):
         raise SessionError(
             f"{rest_error}; retry without --no-capture to read the page's own requests"
         )
-    log(f"note: {rest_error}")
+    if not skipped:
+        log(f"note: {rest_error}")
     log("reading the collections the saved page loads for itself ...")
     try:
         collections = session.collections_via_capture(
@@ -388,7 +445,9 @@ def command_check(args: argparse.Namespace) -> int:
         if who.get("logged_in"):
             args.username = args.username or who.get("username") or ""
             try:
-                collections, source = list_collections(session, args)
+                collections, source = list_collections(
+                    session, args, Path(args.output_root)
+                )
             except (SessionError, cdp.CdpError, RuntimeError) as exc:
                 payload["collections_error"] = str(exc)
             else:
@@ -853,7 +912,7 @@ def command_sync(args: argparse.Namespace) -> int:
         live: list[dict] = []
         live_error = ""
         try:
-            live, source = list_collections(session, args)
+            live, source = list_collections(session, args, root)
         except SessionError as exc:
             live_error = str(exc)
         if existing:
@@ -1008,6 +1067,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_capture_arguments(check)
     check.add_argument("--max-items", type=int, default=5000)
     check.add_argument("--delay-ms", type=int, default=400)
+    check.add_argument(
+        "--output-root", type=Path, default=Path("instagram-saved"),
+        help="where the sync state lives (retired-route hints are read from here)",
+    )
     check.set_defaults(func=command_check)
 
     launch = subparsers.add_parser("launch", help="start the dedicated debug browser")
