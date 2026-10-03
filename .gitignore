@@ -1,6 +1,7 @@
 # Downloaded Instagram media and run artifacts (do not redistribute)
 /downloads/
 /.codex-work/
+/instagram-saved/
 
 # Python
 __pycache__/

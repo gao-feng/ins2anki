@@ -16,6 +16,10 @@ def main() -> int:
     parser.add_argument("url")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--cookies", type=Path)
+    parser.add_argument(
+        "--cookies-from-browser",
+        help="Read login cookies directly with yt-dlp (for example: chrome or firefox)",
+    )
     args = parser.parse_args()
 
     exe = shutil.which("yt-dlp")
@@ -37,6 +41,8 @@ def main() -> int:
     ]
     if args.cookies:
         cmd += ["--cookies", str(args.cookies.resolve())]
+    if args.cookies_from_browser:
+        cmd += ["--cookies-from-browser", args.cookies_from_browser]
     cmd.append(args.url)
     completed = subprocess.run(cmd, text=True)
     if completed.returncode:

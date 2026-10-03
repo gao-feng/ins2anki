@@ -1,6 +1,6 @@
 ---
 name: instagram-to-anki
-description: Download video or images from an Instagram post or reel, transcribe spoken English, identify contextually challenging English vocabulary, ask the user which words, meanings, and media to keep, then save only the confirmed material as Anki notes through AnkiConnect. Use when a user provides an Instagram URL and asks to study its English, extract difficult words, make vocabulary flashcards, or import the post into Anki.
+description: Download or incrementally mirror authorized Instagram posts and saved collections, transcribe spoken English, identify contextually challenging vocabulary, confirm selections, and save approved material as Anki notes through AnkiConnect. Use for Instagram collection sync, local media mirroring, English study, vocabulary extraction, or Anki import.
 ---
 
 # Instagram to Anki
@@ -15,6 +15,30 @@ Follow the workflow in order. Treat user confirmation as a mandatory commit boun
 4. Inspect `manifest.json`. Preserve the original media; do not recompress it unless a downstream tool requires a compatible copy.
 
 Instagram content may be copyrighted or private. Download only content the user is authorized to access. Do not bypass access controls, and do not redistribute the downloaded media.
+
+### Incrementally sync a saved collection
+
+When the user asks to mirror an Instagram saved collection locally, run
+`scripts/sync_instagram_saved.py` with either `--collection-url` or
+`--urls-file`, plus `--output-dir`. For a private saved collection, prefer
+`--cookies-from-browser BROWSER` so credentials remain in the browser profile.
+The sync command records `sync-state.json`, validates completed media before
+skipping it, downloads only newly discovered or incomplete posts, and retries
+failed posts on later runs. Use `--dry-run` for discovery without downloads.
+
+Collection sync only downloads authorized source media. It does not imply
+permission to create Anki notes; continue to require the confirmation in step 3
+before importing any synchronized post into Anki.
+
+For all-collection sync, inspect the user's logged-in Instagram Saved UI with the
+available browser tool. Enumerate every collection, scroll each collection until
+no new post links appear, and write a UTF-8 inventory JSON with a `collections`
+array. Each entry must contain `name`, `url`, and a deduplicated `posts` array.
+Then run `scripts/sync_instagram_collections.py --inventory FILE --output-dir
+DIR`, adding the authorized cookie option when downloads require login. The
+coordinator creates a safe directory for every collection and maintains a
+separate incremental state inside it. Do not store browser cookies in the
+inventory.
 
 ## 2. Transcribe and extract vocabulary
 

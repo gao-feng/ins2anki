@@ -18,6 +18,8 @@ instagram-to-anki/
   agents/openai.yaml          # agent interface metadata
   scripts/
     download_instagram.py     # yt-dlp downloader + manifest writer
+    sync_instagram_saved.py   # incremental saved-collection sync
+    sync_instagram_collections.py # per-collection directory coordinator
     tts_word.py               # local TTS pronunciation (Windows SAPI + ffmpeg)
     anki_import.py            # AnkiConnect importer (notes + media)
   references/
@@ -49,6 +51,69 @@ Inside an opencode session, give an Instagram URL and ask to study its English:
 > https://www.instagram.com/p/DYaN8HxT-pt/
 
 The agent runs the workflow, presents candidates, and waits for your confirmation before touching Anki. The default deck is `ins`.
+
+### Incrementally sync a saved collection
+
+Use the saved collection URL and an already logged-in browser profile. Cookies are
+read directly by `yt-dlp`; the sync state does not store them:
+
+```bash
+python instagram-to-anki/scripts/sync_instagram_saved.py \
+  --collection-url 'https://www.instagram.com/USER/saved/_/COLLECTION_ID/' \
+  --cookies-from-browser chrome \
+  --output-dir instagram-saved
+```
+
+The command writes `instagram-saved/sync-state.json`. A later run discovers the
+collection again, skips posts with a valid manifest and media file, downloads only
+new posts, and retries prior failures. Use `--no-retry-failed` to skip failures or
+`--limit 20` to cap one run.
+
+Instagram may temporarily prevent `yt-dlp` from enumerating a saved collection.
+In that case, export one post/reel URL per line and use the same incremental engine:
+
+```bash
+python instagram-to-anki/scripts/sync_instagram_saved.py \
+  --urls-file saved-urls.txt \
+  --cookies-from-browser chrome \
+  --output-dir instagram-saved
+```
+
+Use `--dry-run` to update discovery state and display pending URLs without
+downloading. Do not share cookie files or downloaded private media.
+
+### Mirror multiple saved collections
+
+The skill can inspect the logged-in Instagram Saved UI and write a browser
+inventory containing each collection's name, URL, and post URLs. The local
+coordinator creates one safe directory per collection and gives every directory
+its own incremental `sync-state.json`:
+
+```bash
+python instagram-to-anki/scripts/sync_instagram_collections.py \
+  --inventory collections.json \
+  --cookies-from-browser chrome \
+  --output-dir instagram-saved
+```
+
+Inventory format:
+
+```json
+{
+  "collections": [
+    {
+      "name": "英语",
+      "url": "https://www.instagram.com/USER/saved/_/COLLECTION_ID/",
+      "posts": ["https://www.instagram.com/reel/POST_ID/"]
+    }
+  ]
+}
+```
+
+Directory names preserve Unicode names, replace filesystem-reserved characters,
+and add the collection ID when two collections have the same name. Run the same
+command again after refreshing the browser inventory to download only new or
+missing posts.
 
 ## Notes
 
