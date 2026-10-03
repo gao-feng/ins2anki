@@ -517,6 +517,15 @@ class FavoritesSession:
         """
         emit = log or (lambda _message: None)
         self.install_hook()
+        # A background tab has its timers and observers throttled, which
+        # silently kills the lazy loading the scroll is meant to trigger: a
+        # Douyin sync stopped at the first page (19 of 234 items) while its
+        # tab sat behind the user's terminal. Bring it to the front so the
+        # page actually paginates.
+        try:
+            self.call("Page.bringToFront")
+        except cdp.CdpError:
+            pass  # headless and already-focused pages may refuse; scrolling still runs
         if reset:
             self.evaluate(CLEAR_HARVEST_JS)
         if url:
@@ -524,6 +533,7 @@ class FavoritesSession:
         time.sleep(max(delay_ms, 200) / 1000.0)
 
         stable = 0
+        empty = 0
         previous = -1
         counts: dict = {}
         for index in range(1, max(rounds, 1) + 1):
@@ -534,7 +544,14 @@ class FavoritesSession:
                 f"{counts.get('awemes', 0)} douyin item(s), "
                 f"{counts.get('folders', 0)} folder candidate(s)"
             )
-            if total == previous:
+            if total == 0:
+                # The first page can take seconds to hydrate; an empty round
+                # must not eat into the stability budget or a slow boot ends
+                # the harvest with nothing.
+                empty += 1
+                if empty >= max(stable_rounds * 3, 10):
+                    break
+            elif total == previous:
                 stable += 1
                 if stable >= stable_rounds:
                     break

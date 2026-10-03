@@ -217,6 +217,82 @@ class DouyinDownloadTest(unittest.TestCase):
             self.assertEqual(state["items"][self.record["id"]]["status"], "completed")
 
 
+class HarvestStopRulesTest(unittest.TestCase):
+    """The scroll loop must not give up while the page is still loading.
+
+    A real Douyin sync stopped at the first page (19 of 234 items): two empty
+    rounds while the collection tab hydrated ate the stability budget, and a
+    background tab never fired the lazy loads at all. The rules now are: an
+    empty round never counts as stable (a slow boot gets its chance), nothing
+    counts before the first item appears beyond a hard cap, and the tab is
+    brought to the front so its timers actually run.
+    """
+
+    class _Stub:
+        """A session-less FavoritesSession replaying scripted round counts."""
+
+        script: list
+        brought_to_front = False
+        timeout = 5  # harvest() reads self.timeout for every evaluate()
+
+        def __init__(self, script):
+            self.script = script
+            self.rounds = 0
+
+        def harvest(self, **kwargs):
+            kwargs.setdefault("rounds", 60)
+            kwargs.setdefault("delay_ms", 1)
+            return self._fs.FavoritesSession.harvest(self, **kwargs)
+
+        def install_hook(self):
+            pass
+
+        def call(self, method, params=None, timeout=None):
+            if method == "Page.bringToFront":
+                HarvestStopRulesTest._Stub.brought_to_front = True
+            return {}
+
+        def evaluate(self, expression, timeout=None):
+            if "scrollTop" in expression:  # SCROLL_JS
+                counts = self.script[min(self.rounds, len(self.script) - 1)]
+                self.rounds += 1
+                return {"tokens": 0, "awemes": counts, "folders": 0}
+            if "clear" in expression:
+                return None
+            peak = max(self.script) if self.script else 0
+            return {"awemes": {str(n): {} for n in range(1, peak + 1)}}
+
+    def test_slow_first_page_is_not_abandoned(self):
+        stub = self._Stub([0, 0, 5, 5, 5])
+        harvest = self._fs_harvest(stub)
+        self.assertEqual(len(harvest.get("awemes", {})), 5)
+        self.assertTrue(self._Stub.brought_to_front)
+
+    def test_growth_resets_and_stable_triples_stop(self):
+        stub = self._Stub([3, 3, 9, 15, 15, 15])
+        self._fs_harvest(stub)
+        # rounds 5-7 repeat 15 three times: stop on the 7th scroll
+        self.assertEqual(stub.rounds, 7)
+
+    def test_dead_page_gives_up_after_the_empty_cap(self):
+        stub = self._Stub([0] * 30)
+        self._fs_harvest(stub)
+        self.assertEqual(stub.rounds, 10)
+
+    def test_zero_after_items_is_not_stability(self):
+        stub = self._Stub([5] + [0] * 12)
+        self._fs_harvest(stub)
+        self.assertEqual(stub.rounds, 11)
+
+    def _fs_harvest(self, stub):
+        real_sleep = FAVORITES.time.sleep
+        FAVORITES.time.sleep = lambda _seconds: None
+        try:
+            return FAVORITES.FavoritesSession.harvest(stub)
+        finally:
+            FAVORITES.time.sleep = real_sleep
+
+
 class CliTest(unittest.TestCase):
     def test_sync_defaults_to_xiaohongshu(self):
         args = FAVORITES.build_parser().parse_args(["sync", "--output-dir", "/tmp/x"])
