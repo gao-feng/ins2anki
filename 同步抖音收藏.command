@@ -1,10 +1,15 @@
 #!/bin/bash
-# Instagram 收藏夹同步 —— 双击运行。
+# 抖音收藏同步 —— 双击运行。
 #
 # 确定性工具：不依赖 AI / skill，不导出 cookie，也不读 macOS 钥匙串，
 # 因此不会弹"访问机密信息"的授权框。首次运行会打开一个专用浏览器窗口
 # （~/.ins2anki/browser-profile，与你平时的 Edge/Chrome 互不影响），
-# 在里面登录一次 Instagram 即可，之后每次双击都是增量同步。
+# 在里面登录一次抖音即可；之后每次双击都是增量同步，已下载的自动跳过。
+#
+# 可覆盖的环境变量：
+#   INS2ANKI_OUTPUT     输出目录（默认 douyin-saved/收藏）
+#   INS2ANKI_JOBS       并行下载数（默认 4）
+#   INS2ANKI_BROWSER    指定浏览器可执行文件
 
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
@@ -22,37 +27,38 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-TOOL="scripts/browser_sync.py"
-OUT="${INS2ANKI_OUTPUT:-$PWD/instagram-saved}"
+TOOL="scripts/favorites_sync.py"
+OUT="${INS2ANKI_OUTPUT:-$PWD/douyin-saved/收藏}"
+ARGS=(--platform douyin)
+[ -n "${INS2ANKI_BROWSER:-}" ] && ARGS+=(--browser "$INS2ANKI_BROWSER")
 
 echo "=== 检查浏览器会话 ==="
-if ! "$PY" "$TOOL" check >/dev/null 2>&1; then
+if ! "$PY" "$TOOL" check "${ARGS[@]}" >/dev/null 2>&1; then
   cat <<'TXT'
 
 首次使用：接下来会打开一个专用浏览器窗口。
-  1. 在这个窗口里登录 Instagram（只需一次）
-  2. 登录成功后回到本窗口按回车
+  1. 在这个窗口里登录抖音（只需一次，之后一直有效）
+  2. 打开个人主页的「收藏」标签，能看到收藏列表
+  3. 回到本窗口按回车
 
 TXT
-  "$PY" "$TOOL" launch >/dev/null 2>&1 || true
+  "$PY" "$TOOL" launch "${ARGS[@]}" >/dev/null 2>&1 || true
   read -r -p "登录完成后按回车继续..."
   echo
 fi
 
 echo "=== 开始同步（已下载的会自动跳过）==="
-# --jobs: 直连 CDN 的并行下载数；签名直链彼此独立，并发是安全的。
-if "$PY" "$TOOL" sync --all-collections --launch --jobs "${INS2ANKI_JOBS:-6}" \
-     --output-root "$OUT"; then
+if "$PY" "$TOOL" sync "${ARGS[@]}" --output-dir "$OUT" --jobs "${INS2ANKI_JOBS:-4}"; then
   echo
   echo "完成。文件位置：${OUT}"
-  echo "每个收藏夹一个子目录，含 manifest.json 与 sync-state.json。"
+  echo "每条收藏一个子目录，含 manifest.json；sync-state.json 记录增量状态。"
 else
   code=$?
   echo
   echo "有项目没同步成功，退出码 ${code}（上面列出了失败条目和原因）。"
   echo "再次双击会自动重试：已下载完的文件不会重复下载。"
-  echo "如果反复失败，运行自诊断看看页面实际请求了什么："
-  echo "  python3 ${TOOL} diagnose --launch"
+  echo "如果一条都抓不到，运行自诊断看看页面实际请求了什么："
+  echo "  python3 ${TOOL} diagnose --platform douyin"
 fi
 echo
 read -r -p "按回车关闭窗口..."

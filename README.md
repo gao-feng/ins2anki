@@ -17,8 +17,9 @@ Supported sources: **Instagram** posts/reels and saved collections, **Xiaohongsh
 ```
 saved-sync/
   README.md
-  同步收藏夹.command           # 双击：Instagram 收藏夹 → instagram-saved/
-  同步小红书收藏.command       # 双击：小红书/抖音 收藏 → xhs-saved/ …
+  同步Instagram收藏.command           # 双击：Instagram 收藏夹 → instagram-saved/
+  同步小红书收藏.command       # 双击：小红书收藏 → xhs-saved/
+  同步抖音收藏.command         # 双击：抖音收藏 → douyin-saved/
   scripts/                    # everything runnable (stdlib-only, run in place)
     browser_sync.py           # Instagram sync CLI: check/launch/collections/sync/diagnose/repair
     browser_session.py        # Instagram CDP session + page-query replay
@@ -84,7 +85,7 @@ The agent runs the workflow, presents candidates, and waits for your confirmatio
 
 ### 一键同步整个 Instagram 收藏夹（推荐，不需要 cookie）
 
-双击仓库根目录的 [同步收藏夹.command](<同步收藏夹.command>) 即可。首次运行会打开一个
+双击仓库根目录的 [同步Instagram收藏.command](<同步Instagram收藏.command>) 即可。首次运行会打开一个
 **专用浏览器窗口**（profile 在 `~/.ins2anki/browser-profile`，与你平时的 Edge/Chrome 互不影响），
 在里面登录一次 Instagram；之后每次双击都只做增量同步，已下载的自动跳过，文件写到
 `instagram-saved/<收藏夹名>/`。
@@ -144,7 +145,7 @@ python3 scripts/browser_sync.py repair --output-root instagram-saved
 # 2) 记为待重下：把条目目录改名为 <短码>.unplayable/ 并从 sync state 移除（不删文件）
 python3 scripts/browser_sync.py repair --output-root instagram-saved --forget
 
-# 3) 重新下载（不能跳过！）——双击 同步收藏夹.command，或：
+# 3) 重新下载（不能跳过！）——双击 同步Instagram收藏.command，或：
 python3 scripts/browser_sync.py sync --all-collections --launch --output-root instagram-saved
 
 # 4) 确认刷新完成后再删备份（只报告：期望 unplayable: 0）
