@@ -199,6 +199,37 @@ def load_inventory(path: Path) -> list[dict[str, Any]]:
     return result
 
 
+def summarize_error(detail: str, limit: int = 160) -> str:
+    """Pull the human-readable reason out of a downloader failure.
+
+    ``download_media`` prints a pretty-printed JSON object whose first line is
+    a bare ``{``, and yt-dlp leads its stderr with upgrade warnings before the
+    ``ERROR:`` line that actually says what went wrong. Either way the first
+    line of the raw text is useless, so dig one level deeper.
+    """
+    text = str(detail or "").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("error"):
+        reason = str(payload["error"]).strip()
+        for line in reason.splitlines():
+            if line.startswith("ERROR:"):
+                return line[:limit]
+        return (reason.splitlines()[0] if reason else text)[:limit]
+    for line in text.splitlines():
+        if line.startswith("ERROR:"):
+            return line[:limit]
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and stripped not in {"{", "}"}:
+            return stripped[:limit]
+    return text[:limit]
+
+
 def sync_items(
     discovered: list[tuple[str, str, str]],
     output_dir: Path,
@@ -315,7 +346,7 @@ def sync_items(
         rate = done / elapsed if elapsed > 0 else 0.0
         remaining = max(len(pending) - done, 0)
         eta = remaining / rate if rate > 0 else 0.0
-        reason = "" if ok else f"  {detail.splitlines()[0][:160]}"
+        reason = "" if ok else f"  {summarize_error(detail)}"
         print(
             f"[{done}/{len(pending)}] {item_id} {'ok' if ok else 'FAILED'}"
             f"  {rate:.1f} items/s  elapsed {format_duration(elapsed)}"
@@ -361,7 +392,7 @@ def sync_items(
 
     attempted_ids = {entry[1] for entry in pending}
     failed_now = [
-        (key, str(value.get("error") or "").splitlines()[0][:200])
+        (key, summarize_error(str(value.get("error") or ""), 200))
         for key, value in items.items()
         if value.get("status") == "failed" and key in attempted_ids
     ]

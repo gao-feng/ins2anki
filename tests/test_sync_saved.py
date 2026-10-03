@@ -287,6 +287,37 @@ class GenericSyncEngineTests(unittest.TestCase):
             self.assertEqual(seen, ["https://www.douyin.com/video/6961737553342991651"])
 
 
+class ErrorSummaryTests(unittest.TestCase):
+    """The failure reason shown on the progress line must be the real one.
+
+    download_media pretty-prints its error JSON (first line ``{``) and yt-dlp
+    leads stderr with upgrade warnings; neither may mask the actual reason.
+    """
+
+    def test_json_error_object_shows_its_error_field(self):
+        detail = '{\n  "error": "no video formats were found",\n  "platform": "xiaohongshu"\n}'
+        self.assertEqual(SYNC_COMMON.summarize_error(detail), "no video formats were found")
+
+    def test_yt_dlps_error_line_wins_over_leading_warnings(self):
+        detail = (
+            "WARNING: Your yt-dlp version (2026.07.04) is older than 90 days!\n"
+            "         It is strongly recommended to update.\n"
+            "ERROR: unable to download video data: HTTP Error 424: Failed Dependency"
+        )
+        self.assertEqual(
+            SYNC_COMMON.summarize_error(detail),
+            "ERROR: unable to download video data: HTTP Error 424: Failed Dependency",
+        )
+
+    def test_error_field_holding_yt_dlP_stderr_still_finds_error_line(self):
+        detail = '{\n  "error": "WARNING: outdated\\nERROR: the real reason",\n  "url": "u"\n}'
+        self.assertEqual(SYNC_COMMON.summarize_error(detail), "ERROR: the real reason")
+
+    def test_plain_text_and_empty(self):
+        self.assertEqual(SYNC_COMMON.summarize_error("plain failure"), "plain failure")
+        self.assertEqual(SYNC_COMMON.summarize_error(""), "")
+
+
 class DownloadStrategyTests(unittest.TestCase):
     """The probe must pick video vs. image gallery without false positives."""
 
