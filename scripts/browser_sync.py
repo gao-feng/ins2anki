@@ -261,6 +261,11 @@ def enumerate_items(
                 delay_ms=args.delay_ms,
                 log=log,
             )
+        except browser_session.RateLimitedError:
+            # a spent quota must abort the run, not fall through to capture:
+            # the capture would then read the global saved feed and file its
+            # few newest items into every collection it walks
+            raise
         except (SessionError, cdp.CdpError) as exc:
             problems.append(f"page query: {exc}")
         else:
@@ -648,6 +653,9 @@ def _probe(args: argparse.Namespace) -> int:
                     page_size=12,
                     delay_ms=args.delay_ms,
                 )
+            except browser_session.RateLimitedError:
+                print("✗ 仍被限流：收藏流查询的配额还没恢复，过几个小时或明早再查")
+                return 1
             except (SessionError, cdp.CdpError) as exc:
                 print(f"✗ 收藏夹「{smallest.get('name')}」打不开（{exc}），现在不能同步")
                 return 1
@@ -1037,7 +1045,16 @@ def _command_sync(args: argparse.Namespace) -> int:
         args.username = resolve_username(session, args)
         if not args.all_collections:
             collection = resolve_collection(session, args.collection, args)
-            items, source = enumerate_items(session, collection, args)
+            try:
+                items, source = enumerate_items(session, collection, args)
+            except browser_session.RateLimitedError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                print(
+                    "nothing was downloaded; a rate-limited enumeration cannot "
+                    "be trusted. Probe again later with 检查Instagram状态.command",
+                    file=sys.stderr,
+                )
+                return 1
             if not items:
                 print("error: no items were discovered for this collection", file=sys.stderr)
                 return 2
@@ -1115,6 +1132,16 @@ def _command_sync(args: argparse.Namespace) -> int:
             log(f"--- {collection.get('name')} -> {root / directory}")
             try:
                 items, source = enumerate_items(session, collection, args)
+            except browser_session.RateLimitedError as exc:
+                log(f"error: {exc}")
+                log(
+                    "stopping the whole sync before downloading anything: a "
+                    "rate-limited enumeration cannot tell collections apart "
+                    "and would file items into the wrong folders. Probe with "
+                    "检查Instagram状态.command and retry once it answers ✓"
+                )
+                errors += 1
+                break
             except (SessionError, cdp.CdpError) as exc:
                 log(f"skipping {collection.get('name')}: {exc}")
                 errors += 1

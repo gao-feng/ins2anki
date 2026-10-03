@@ -45,15 +45,25 @@ echo "=== 开始同步（已下载的会自动跳过）==="
 if "$PY" "$TOOL" sync --all-collections --launch --jobs "${INS2ANKI_JOBS:-6}" \
      --output-root "$OUT"; then
   echo
+  echo "=== 清扫已被视频替代的封面备份 ==="
+  "$PY" "$TOOL" repair --output-root "$OUT" --clean
+  echo
   echo "完成。文件位置：${OUT}"
   echo "每个收藏夹一个子目录，含 manifest.json 与 sync-state.json。"
+  echo "没有可用替代的备份会保留（帖子被删时那是最后一份）。"
 else
   code=$?
   echo
-  echo "有项目没同步成功，退出码 ${code}（上面列出了失败条目和原因）。"
-  echo "再次双击会自动重试：已下载完的文件不会重复下载。"
-  echo "如果反复失败，运行自诊断看看页面实际请求了什么："
-  echo "  python3 ${TOOL} diagnose --launch"
+  if [ "$code" -eq 3 ]; then
+    echo "已经有一个同步在跑，等它结束后再来。"
+  else
+    echo "有项目没同步成功，退出码 ${code}（上面列出了失败条目和原因）。"
+    echo "若上面提到 rate-limit（限流）：什么都没下载，等配额恢复后先用"
+    echo "「检查Instagram状态.command」探测，答 ✓ 再双击这里。"
+    echo "其它失败：再次双击会自动重试，已下载完的不会重复下载。"
+    echo "如果反复失败，运行自诊断看看页面实际请求了什么："
+    echo "  python3 ${TOOL} diagnose --launch"
+  fi
 fi
 echo
 read -r -p "按回车关闭窗口..."

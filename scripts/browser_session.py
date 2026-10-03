@@ -83,8 +83,35 @@ SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345
 _INVALID_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
+#: Instagram's "you asked too often" complaint, seen on /api/graphql replays
+RATE_LIMIT_CODES = {1675004}
+
+
+def rate_limit_message(payload: Any) -> str | None:
+    """Return Instagram's rate-limit complaint, if the payload carries one.
+
+    A throttled graphql answers HTTP 200 with an empty ``data`` and this
+    error tucked inside — without looking, an exhausted quota reads as an
+    empty collection and the sync files whatever the global feed offers
+    into every folder it walks.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for error in payload.get("errors") or []:
+        if not isinstance(error, dict):
+            continue
+        message = str(error.get("message") or "")
+        if error.get("code") in RATE_LIMIT_CODES or "rate limit" in message.lower():
+            return message or "rate limit exceeded"
+    return None
+
+
 class SessionError(RuntimeError):
     """Raised when no usable browser session is available."""
+
+
+class RateLimitedError(SessionError):
+    """Instagram refused the query because its quota for this session is spent."""
 
 
 # --------------------------------------------------------------------------
@@ -1035,6 +1062,12 @@ class InstagramSession:
                     json.dumps(variables),
                 )
                 payload = self.replay(request, body=body)
+                limited = rate_limit_message(payload)
+                if limited:
+                    raise RateLimitedError(
+                        f"Instagram is rate-limiting the saved-collection query "
+                        f"({limited}); wait for the quota window to reset"
+                    )
                 pages += 1
                 emit(f"page {pages}: {len(items)} item(s) so far")
                 page_items = extract_media([payload])

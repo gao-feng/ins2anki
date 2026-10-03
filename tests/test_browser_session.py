@@ -500,6 +500,82 @@ class ReplayHelperTest(unittest.TestCase):
         self.assertEqual(sorted(item["code"] for item in items), ["DAbc123", "DDef456"])
 
 
+class _NullCdp:
+    """Just enough CDP session for a NetworkCapture to start and drain."""
+
+    def call(self, _method, _params=None, timeout=None):
+        return {}
+
+    def drain_events(self):
+        return []
+
+
+class RateLimitTest(unittest.TestCase):
+    def test_the_complaint_is_recognized_by_code_and_by_text(self):
+        self.assertEqual(
+            BROWSER_SESSION.rate_limit_message(
+                {"errors": [{"code": 1675004, "message": "Rate limit exceeded"}]}
+            ),
+            "Rate limit exceeded",
+        )
+        self.assertEqual(
+            BROWSER_SESSION.rate_limit_message(
+                {"errors": [{"message": "rate limit exceeded, slow down"}]}
+            ),
+            "rate limit exceeded, slow down",
+        )
+        self.assertIsNone(BROWSER_SESSION.rate_limit_message({"data": {"ok": 1}}))
+        self.assertIsNone(
+            BROWSER_SESSION.rate_limit_message(
+                {"errors": [{"code": 100, "message": "not a limit"}]}
+            )
+        )
+
+    def test_collection_feed_raises_instead_of_returning_nothing(self):
+        session = BROWSER_SESSION.InstagramSession.__new__(BROWSER_SESSION.InstagramSession)
+        session.session = _NullCdp()
+        with mock.patch.object(session, "navigate"), mock.patch.object(
+            session,
+            "_feed_request",
+            return_value={
+                "url": "https://www.instagram.com/api/graphql",
+                "method": "POST",
+                "headers": {},
+                "post_data": "variables=%7B%7D",
+            },
+        ), mock.patch.object(
+            session,
+            "replay",
+            return_value={"errors": [{"code": 1675004, "message": "Rate limit exceeded"}]},
+        ):
+            with self.assertRaises(BROWSER_SESSION.RateLimitedError):
+                session.collection_feed(
+                    "https://www.instagram.com/u/saved/_/1/",
+                    collection_id="1",
+                    settle=0.05,
+                )
+
+    def test_enumerate_items_does_not_swallow_a_rate_limit(self):
+        """A spent quota must abort, not fall through to the capture route.
+
+        The capture reads the global saved feed when the collection query is
+        throttled, and the sync would file those few newest items into every
+        collection it walks.
+        """
+        session = mock.Mock(spec=BROWSER_SESSION.InstagramSession)
+        session.collection_items.side_effect = BROWSER_SESSION.SessionError("no rest route")
+        session.collection_feed.side_effect = BROWSER_SESSION.RateLimitedError(
+            "Instagram is rate-limiting the saved-collection query"
+        )
+        args = argparse.Namespace(
+            capture=True, no_replay=False, max_items=10, delay_ms=1,
+            username="u", origin="https://www.instagram.com/",
+            dom_fallback=False, dom_rounds=1, dom_delay_ms=1,
+        )
+        with self.assertRaises(BROWSER_SESSION.RateLimitedError):
+            BROWSER_SYNC.enumerate_items(session, {"id": "1", "url": "https://x/"}, args)
+
+
 class _RetiringSession:
     """An InstagramSession whose REST route 404s, counting the probes."""
 
