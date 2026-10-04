@@ -699,6 +699,7 @@ def _parked_backlog(root: Path) -> tuple[dict[str, list[dict]], list[str]]:
     """
     groups: dict[str, list[dict]] = {}
     skipped: list[str] = []
+    seen: set[tuple[str, str]] = set()
     for backup in sorted(root.glob(f"*/**/*{BACKUP_SUFFIX}*")):
         if not backup.is_dir() or not backup.is_relative_to(root):
             continue
@@ -711,11 +712,20 @@ def _parked_backlog(root: Path) -> tuple[dict[str, list[dict]], list[str]]:
             skipped.append(backup.name)
             continue
         meta = (manifest.get("metadata") or [{}])[0]
-        pk = str(meta.get("id") or "")
+        pk = str(meta.get("id") or "").split("_", 1)[0]
         code = str(meta.get("shortcode") or item_id)
-        if not pk:
-            skipped.append(backup.name)
+        # yt-dlp's id can be the URL shortcode; media-info requires the
+        # numeric media id. Repeated repair runs also park several backups.
+        if not pk.isdecimal():
+            try:
+                pk = str(browser_session.shortcode_to_pk(code))
+            except ValueError:
+                skipped.append(backup.name)
+                continue
+        key = (backup.parent.name, code)
+        if key in seen:
             continue
+        seen.add(key)
         try:
             media_type = int(meta.get("media_type") or 0)
         except (TypeError, ValueError):
@@ -765,10 +775,18 @@ def _refetch(args: argparse.Namespace) -> int:
     with open_session(args) as session:
         try:
             session.media_info(str(canary.get("pk") or ""))
+        except browser_session.RateLimitedError as exc:
+            print(
+                f"error: Instagram rate-limited the per-post request ({exc}); "
+                "nothing was downloaded, retry later",
+                file=sys.stderr,
+            )
+            return 1
         except (SessionError, cdp.CdpError) as exc:
             print(
-                f"error: the per-post route is throttled too ({exc}); "
-                "nothing was downloaded, wait for the quota to reset",
+                f"error: could not fetch the test post ({exc}); nothing was downloaded. "
+                "Check the dedicated browser's connection and login, then retry; "
+                "this error does not confirm rate limiting",
                 file=sys.stderr,
             )
             return 1

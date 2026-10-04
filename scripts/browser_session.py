@@ -922,7 +922,18 @@ class InstagramSession:
             "pk": json.dumps(str(pk)),
             "delay_ms": int(delay_ms),
         }
-        payload = self.evaluate(script, timeout=timeout or max(self.timeout, 60.0))
+        for attempt in range(3):
+            try:
+                payload = self.evaluate(script, timeout=timeout or max(self.timeout, 60.0))
+                break
+            except cdp.CdpError as exc:
+                if "HTTP 429 for " in str(exc):
+                    raise RateLimitedError(str(exc)) from exc
+                # A rejected fetch has no HTTP response. Retry this idempotent
+                # read briefly; it is not evidence of an exhausted quota.
+                if "TypeError: Failed to fetch" not in str(exc) or attempt == 2:
+                    raise
+                time.sleep(0.5 * (2 ** attempt))
         if not isinstance(payload, dict) or not payload.get("pk"):
             raise SessionError(f"no media info for {pk}")
         return payload
