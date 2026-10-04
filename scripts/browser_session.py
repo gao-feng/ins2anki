@@ -1022,11 +1022,18 @@ class InstagramSession:
         delay_ms: int = 150,
         settle: float = 2.0,
         log=None,
+        is_known=None,
     ) -> dict:
         """Enumerate a saved collection by replaying its own feed query.
 
         Deterministic and complete: the page's query is replayed with only its
         ``variables`` swapped, then paginated by ``page_info.end_cursor``.
+
+        ``is_known``, when given, decides whether a shortcode is already
+        archived. Saved collections are ordered newest-first, so once a whole
+        page holds nothing new the rest cannot hold anything new either, and
+        the walk stops — a routine sync costs one or two queries per
+        collection instead of one per twelve items.
         """
         if self.session is None:
             raise SessionError("session is not connected")
@@ -1082,6 +1089,19 @@ class InstagramSession:
                 items.extend(fresh)
                 info = find_page_info(payload)
                 cursor = info.get("end_cursor") or None
+                codes = [item_shortcode(item) for item in page_items if item_shortcode(item)]
+                if is_known is not None and codes and all(is_known(code) for code in codes):
+                    emit(
+                        f"page {pages}: {len(items)} item(s), the whole page is "
+                        "already archived — stopping (incremental)"
+                    )
+                    return {
+                        "items": items[:max_items],
+                        "pages": pages,
+                        "request": request,
+                        "query": query,
+                        "stopped_early": True,
+                    }
                 if not info.get("has_next_page") or not cursor or not fresh:
                     break
                 if delay_ms:

@@ -217,8 +217,31 @@ def resolve_collection(
     return browser_session.match_collection(collections, query)
 
 
+def known_shortcodes(state_file: Path | None) -> set[str]:
+    """Shortcodes already archived with a completed download.
+
+    Only ``completed`` counts: a forgotten or failed item must be walked past
+    so the sync meets it again, which is what makes ``repair --forget``
+    self-healing under incremental enumeration.
+    """
+    if not state_file or not Path(state_file).is_file():
+        return set()
+    try:
+        state = sync_common.load_state(Path(state_file))
+    except (OSError, ValueError):
+        return set()
+    return {
+        item_id
+        for item_id, entry in (state.get("items") or {}).items()
+        if isinstance(entry, dict) and entry.get("status") == "completed"
+    }
+
+
 def enumerate_items(
-    session: InstagramSession, collection: dict, args: argparse.Namespace
+    session: InstagramSession,
+    collection: dict,
+    args: argparse.Namespace,
+    known: set[str] | None = None,
 ) -> tuple[list[dict], str]:
     """Return ``(items, source)``, trying every route from fast to safest.
 
@@ -260,6 +283,7 @@ def enumerate_items(
                 max_items=args.max_items,
                 delay_ms=args.delay_ms,
                 log=log,
+                is_known=None if known is None else (lambda code: code in known),
             )
         except browser_session.RateLimitedError:
             # a spent quota must abort the run, not fall through to capture:
@@ -1045,8 +1069,12 @@ def _command_sync(args: argparse.Namespace) -> int:
         args.username = resolve_username(session, args)
         if not args.all_collections:
             collection = resolve_collection(session, args.collection, args)
+            known = None
+            if not args.full:
+                state_file = args.state_file or Path(args.output_dir) / "sync-state.json"
+                known = known_shortcodes(Path(state_file))
             try:
-                items, source = enumerate_items(session, collection, args)
+                items, source = enumerate_items(session, collection, args, known=known)
             except browser_session.RateLimitedError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 print(
@@ -1130,8 +1158,9 @@ def _command_sync(args: argparse.Namespace) -> int:
         errors = 0
         for collection, directory in zip(collections, directories):
             log(f"--- {collection.get('name')} -> {root / directory}")
+            known = None if args.full else known_shortcodes(root / directory / "sync-state.json")
             try:
-                items, source = enumerate_items(session, collection, args)
+                items, source = enumerate_items(session, collection, args, known=known)
             except browser_session.RateLimitedError as exc:
                 log(f"error: {exc}")
                 log(
@@ -1362,6 +1391,10 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="keep image posts as well as videos (default: yes)",
+    )
+    sync.add_argument(
+        "--full", action="store_true",
+        help="walk every page instead of stopping at already-archived items",
     )
     sync.set_defaults(func=command_sync)
     return parser

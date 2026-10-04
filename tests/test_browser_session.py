@@ -576,6 +576,120 @@ class RateLimitTest(unittest.TestCase):
             BROWSER_SYNC.enumerate_items(session, {"id": "1", "url": "https://x/"}, args)
 
 
+class IncrementalEnumerationTest(unittest.TestCase):
+    def test_a_wholly_archived_page_stops_the_walk(self):
+        session = BROWSER_SESSION.InstagramSession.__new__(BROWSER_SESSION.InstagramSession)
+        session.session = _NullCdp()
+        media_page = {
+            "data": {"fetch__MediaCollection": {"media": {
+                "edges": [
+                    {"node": _media_item("https://x/", str(i), f"K{i:02d}", "demo_user", 1751500000)}
+                    for i in range(12)
+                ],
+                "page_info": {"has_next_page": True, "end_cursor": "next"},
+            }}}
+        }
+        notes: list[str] = []
+        with mock.patch.object(session, "navigate"), mock.patch.object(
+            session,
+            "_feed_request",
+            return_value={
+                "url": "https://www.instagram.com/api/graphql",
+                "method": "POST",
+                "headers": {},
+                "post_data": "variables=%7B%7D",
+            },
+        ), mock.patch.object(session, "replay", return_value=media_page):
+            payload = session.collection_feed(
+                "https://www.instagram.com/u/saved/_/1/",
+                collection_id="1",
+                settle=0.05,
+                log=notes.append,
+                is_known=lambda _code: True,
+            )
+        self.assertTrue(payload["stopped_early"])
+        self.assertEqual(payload["pages"], 1)
+        self.assertIn("stopping (incremental)", " ".join(notes))
+        # the archived items still come back: the sync marks them skipped, and
+        # anything new sitting above them was collected on earlier pages
+
+    def test_a_page_with_anything_new_keeps_walking(self):
+        session = BROWSER_SESSION.InstagramSession.__new__(BROWSER_SESSION.InstagramSession)
+        session.session = _NullCdp()
+        def page(codes, has_next):
+            return {
+                "data": {"fetch__MediaCollection": {"media": {
+                    "edges": [
+                        {"node": _media_item("https://x/", code[1:], code, "demo_user", 1751500000)}
+                        for code in codes
+                    ],
+                    "page_info": {"has_next_page": has_next, "end_cursor": "next" if has_next else None},
+                }}}
+            }
+        # page 1 carries one new item, so the walk must reach page 2; page 2
+        # is wholly archived, so it stops there — one page past the news
+        pages = [page([f"K{i}" for i in range(11)] + ["NEW1"], has_next=True),
+                 page([f"K{i}" for i in range(11, 23)], has_next=True)]
+        with mock.patch.object(session, "navigate"), mock.patch.object(
+            session,
+            "_feed_request",
+            return_value={
+                "url": "https://www.instagram.com/api/graphql",
+                "method": "POST",
+                "headers": {},
+                "post_data": "variables=%7B%7D",
+            },
+        ), mock.patch.object(session, "replay", side_effect=pages):
+            payload = session.collection_feed(
+                "https://www.instagram.com/u/saved/_/1/",
+                collection_id="1",
+                settle=0.05,
+                is_known=lambda code: code.startswith("K"),
+            )
+        self.assertEqual(payload["pages"], 2)
+        self.assertTrue(payload["stopped_early"])
+        self.assertEqual(len(payload["items"]), 24)
+
+        # a collection whose last page still holds news ends naturally,
+        # without the incremental marker
+        pages = [page([f"K{i}" for i in range(11)] + ["NEW1"], has_next=True),
+                 page(["NEW2"], has_next=False)]
+        with mock.patch.object(session, "navigate"), mock.patch.object(
+            session,
+            "_feed_request",
+            return_value={
+                "url": "https://www.instagram.com/api/graphql",
+                "method": "POST",
+                "headers": {},
+                "post_data": "variables=%7B%7D",
+            },
+        ), mock.patch.object(session, "replay", side_effect=pages):
+            payload = session.collection_feed(
+                "https://www.instagram.com/u/saved/_/1/",
+                collection_id="1",
+                settle=0.05,
+                is_known=lambda code: code.startswith("K"),
+            )
+        self.assertEqual(payload["pages"], 2)
+        self.assertNotIn("stopped_early", payload)
+        self.assertEqual(len(payload["items"]), 13)
+
+
+class KnownShortcodesTest(unittest.TestCase):
+    def test_only_completed_entries_count_as_known(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "sync-state.json"
+            state_file.write_text(json.dumps({
+                "items": {
+                    "Ddone": {"status": "completed"},
+                    "Dfailed": {"status": "failed", "error": "gone"},
+                    "Dhalf": {"status": "incomplete"},
+                }
+            }), encoding="utf-8")
+            self.assertEqual(BROWSER_SYNC.known_shortcodes(state_file), {"Ddone"})
+            self.assertEqual(BROWSER_SYNC.known_shortcodes(Path(tmp) / "nope.json"), set())
+
+
 class _RetiringSession:
     """An InstagramSession whose REST route 404s, counting the probes."""
 
