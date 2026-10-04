@@ -607,7 +607,7 @@ def item_media(item: dict) -> list[dict[str, str]]:
         image = str(part.get("image_url") or "")
         if video:
             media.append({"kind": "video", "url": video, "index": position})
-        elif image:
+        elif image and part.get("media_type") != 2:
             media.append({"kind": "image", "url": image, "index": position})
     return media
 

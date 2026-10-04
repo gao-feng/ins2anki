@@ -114,6 +114,12 @@ def valid_download(directory: Path) -> bool:
     if not isinstance(media, list) or not media:
         return False
 
+    metadata = data.get("metadata")
+    expects_video = isinstance(metadata, list) and any(
+        isinstance(entry, dict) and str(entry.get("media_type")) == "2"
+        for entry in metadata
+    )
+
     def usable(path: Path) -> bool:
         try:
             info = path.stat()
@@ -125,6 +131,8 @@ def valid_download(directory: Path) -> bool:
         if not isinstance(raw, str) or not raw or "\x00" in raw:
             continue
         path = Path(raw)
+        if expects_video and path.suffix.lower() not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+            continue
         if not path.is_absolute():
             path = directory / path
         if usable(path):

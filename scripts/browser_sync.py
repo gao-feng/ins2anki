@@ -455,6 +455,11 @@ def make_session_downloader(
                     f"media info failed: {str(exc)[:200]}",
                 )
             media_by_url[url] = item
+        if browser_session.video_part_missing(item):
+            return use_ytdlp(
+                downloader, url, output_dir, cookies, cookies_from_browser,
+                "video URL missing; refusing to download its cover",
+            )
         plan = browser_session.item_media(item)
         if not plan:
             return use_ytdlp(downloader, url, output_dir, cookies, cookies_from_browser, "no media in payload")

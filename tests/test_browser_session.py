@@ -1468,17 +1468,26 @@ class SessionDownloaderTest(unittest.TestCase):
         self.assertTrue(ok)
         patched.assert_called_once()
 
-    def test_without_a_session_a_cover_only_reel_still_saves_its_cover(self):
-        with MockInstagram() as mock_api, tempfile.TemporaryDirectory() as tmp:
-            cover_only = _media_item(mock_api.origin, "1", "DAbc123", "demo_user", 0)
-            cover_only["video_url"] = ""
-            url = BROWSER_SESSION.item_page_url(cover_only)
-            download_fn = BROWSER_SYNC.make_session_downloader({url: cover_only})
-            ok, _detail = download_fn(
-                BROWSER_SYNC.DOWNLOADER, url, Path(tmp) / "out", None, None
-            )
-            self.assertTrue(ok)
-            self.assertTrue((Path(tmp) / "out" / "DAbc123_demo_user.jpg").is_file())
+    def test_cover_only_reel_never_downloads_its_cover(self):
+        for session in (None, mock.Mock()):
+            with self.subTest(session=session), tempfile.TemporaryDirectory() as tmp:
+                cover_only = _media_item("https://cdn.test/", "1", "DAbc123", "demo_user", 0)
+                cover_only["video_url"] = ""
+                if session is not None:
+                    session.media_info.return_value = cover_only
+                url = BROWSER_SESSION.item_page_url(cover_only)
+                download_fn = BROWSER_SYNC.make_session_downloader(
+                    {url: cover_only}, session=session, allow_ytdlp_fallback=False
+                )
+                with mock.patch.object(BROWSER_SESSION, "download_url") as transfer:
+                    ok, detail = download_fn(
+                        BROWSER_SYNC.DOWNLOADER, url, Path(tmp) / "out", None, None
+                    )
+                self.assertFalse(ok)
+                self.assertIn("refusing to download its cover", detail)
+                transfer.assert_not_called()
+                self.assertFalse((Path(tmp) / "out").exists())
+                self.assertEqual(BROWSER_SESSION.item_media(cover_only), [])
 
     def test_prefer_yt_dlp_delegates_to_the_old_path(self):
         item = _media_item("https://cdn.test/", "1", "DAbc123", "demo_user", 0)

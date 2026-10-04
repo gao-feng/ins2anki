@@ -33,6 +33,17 @@ class ValidationTests(unittest.TestCase):
             (root / 'clip.mp4').write_bytes(b'')
             self.assertFalse(sync_common.valid_download(root))
 
+    def test_video_cover_is_not_a_completed_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'cover.jpg').write_bytes(b'cover')
+            manifest = {'media': ['cover.jpg'], 'metadata': [{'media_type': 2}]}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            self.assertFalse(sync_common.valid_download(root))
+            manifest['metadata'][0]['media_type'] = 1
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            self.assertTrue(sync_common.valid_download(root))
+
     def test_download_exception_does_not_abort_remaining_items(self):
         for jobs in (1, 2):
             with self.subTest(jobs=jobs), tempfile.TemporaryDirectory() as tmp:
