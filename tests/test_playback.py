@@ -143,6 +143,31 @@ class RepairTest(unittest.TestCase):
                 }
             state_file.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_parked_backlog_groups_items_by_collection(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            parked = root / "wtf" / "Dgone.unplayable"
+            parked.mkdir(parents=True)
+            (parked / "manifest.json").write_text(json.dumps({
+                "metadata": [{
+                    "id": "3929364714786586536", "shortcode": "Dgone",
+                    "media_type": "2", "product_type": "clips",
+                    "uploader": "someone", "description": "caption",
+                }],
+            }), encoding="utf-8")
+            broken = root / "wtf" / "Dbroken.unplayable"
+            broken.mkdir(parents=True)
+            (broken / "manifest.json").write_text("not json", encoding="utf-8")
+            groups, skipped = BROWSER_SYNC._parked_backlog(root)
+            self.assertEqual(list(groups), ["wtf"])
+            item = groups["wtf"][0]
+            self.assertEqual(item["pk"], "3929364714786586536")
+            self.assertEqual(item["code"], "Dgone")
+            self.assertEqual(item["media_type"], 2)
+            # no urls: the download must enrich through the per-post route
+            self.assertEqual(item["video_url"], "")
+            self.assertEqual(skipped, ["Dbroken.unplayable"])
+
     def test_reports_only_completed_unplayable_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "instagram-saved"

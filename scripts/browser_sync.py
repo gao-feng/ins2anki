@@ -652,6 +652,122 @@ def find_cover_only(root: Path) -> list[dict]:
     return findings
 
 
+def _parked_backlog(root: Path) -> tuple[dict[str, list[dict]], list[str]]:
+    """Group the parked backups into per-collection item lists.
+
+    A parked manifest remembers its post's pk in yt-dlp's info-dict shape,
+    which is everything the per-post media-info route needs: the enriched
+    answer replaces the whole item, so the conversion only carries identity.
+    """
+    groups: dict[str, list[dict]] = {}
+    skipped: list[str] = []
+    for backup in sorted(root.glob(f"*/**/*{BACKUP_SUFFIX}*")):
+        if not backup.is_dir() or not backup.is_relative_to(root):
+            continue
+        item_id = backup.name.split(BACKUP_SUFFIX)[0]
+        try:
+            manifest = json.loads(
+                (backup / "manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            skipped.append(backup.name)
+            continue
+        meta = (manifest.get("metadata") or [{}])[0]
+        pk = str(meta.get("id") or "")
+        code = str(meta.get("shortcode") or item_id)
+        if not pk:
+            skipped.append(backup.name)
+            continue
+        try:
+            media_type = int(meta.get("media_type") or 0)
+        except (TypeError, ValueError):
+            media_type = 0
+        groups.setdefault(backup.parent.name, []).append({
+            "pk": pk,
+            "code": code,
+            "media_type": media_type or 2,
+            "product_type": meta.get("product_type") or "",
+            "taken_at": 0,
+            "username": meta.get("uploader") or "",
+            "caption": meta.get("description") or "",
+            "duration": None,
+            "video_url": "",
+            "image_url": "",
+            "children": [],
+        })
+    return groups, skipped
+
+
+def command_refetch(args: argparse.Namespace) -> int:
+    """Re-download the parked backlog post by post, extension-style.
+
+    The saved-collection query carries the day's rate limit, but the per-post
+    media-info route — the one a browser extension rides on — answers fine.
+    Every parked manifest knows its post's pk, so the whole backlog can be
+    fetched without enumerating anything. A canary item is asked first: if
+    that route is throttled too, nothing is attempted.
+    """
+    try:
+        with sync_common.SyncLock("instagram"):
+            return _refetch(args)
+    except sync_common.SyncBusyError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+
+
+def _refetch(args: argparse.Namespace) -> int:
+    root = Path(args.output_root).expanduser().resolve()
+    groups, skipped = _parked_backlog(root)
+    if skipped:
+        log(f"note: {len(skipped)} parked item(s) have no readable manifest: {skipped[:5]}")
+    if not groups:
+        print(json.dumps({"collections": 0, "items": 0, "note": "nothing is parked"}, indent=2))
+        return 0
+    canary = next(iter(groups.values()))[0]
+    with open_session(args) as session:
+        try:
+            session.media_info(str(canary.get("pk") or ""))
+        except (SessionError, cdp.CdpError) as exc:
+            print(
+                f"error: the per-post route is throttled too ({exc}); "
+                "nothing was downloaded, wait for the quota to reset",
+                file=sys.stderr,
+            )
+            return 1
+        log(f"canary ok: asking Instagram for {sum(len(v) for v in groups.values())} parked item(s)")
+        totals = {
+            "collections": len(groups),
+            "items": sum(len(v) for v in groups.values()),
+            "downloaded": 0,
+            "failed": 0,
+            "via_session": 0,
+            "via_ytdlp": 0,
+        }
+        errors = 0
+        for collection, items in groups.items():
+            log(f"--- {collection}: {len(items)} parked item(s)")
+            code, summary = run_sync(
+                items,
+                root / collection,
+                None,
+                args,
+                source_label=f"repair refetch {root / collection}",
+                session=session,
+            )
+            totals["downloaded"] += int(summary.get("downloaded", 0))
+            totals["failed"] += int(summary.get("failed", 0))
+            totals["via_session"] += int(summary.get("via_session", 0))
+            totals["via_ytdlp"] += int(summary.get("via_ytdlp", 0))
+            # the parked backlog has been walked: no full enumeration needed
+            # on the next sync, failed items stay non-known either way
+            clear_full_walk(root / collection / "sync-state.json")
+            if code:
+                errors += 1
+        totals["errors"] = errors
+        print(json.dumps(totals, ensure_ascii=False, indent=2))
+        return 2 if errors else 0
+
+
 def command_probe(args: argparse.Namespace) -> int:
     """Say whether it is safe to run the sync launcher right now.
 
@@ -724,6 +840,8 @@ def _probe(args: argparse.Namespace) -> int:
 
 def command_repair(args: argparse.Namespace) -> int:
     """Tidy an output tree: unplayable files, leftover partials, backups."""
+    if getattr(args, "refetch", False):
+        return command_refetch(args)
     if getattr(args, "clean", False):
         return command_clean(args)
     root = Path(args.output_root).expanduser().resolve()
@@ -1236,6 +1354,35 @@ def _command_sync(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def add_download_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags the download engine reads, shared by sync and repair --refetch."""
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-retry-failed", action="store_true")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        help="parallel media downloads (default: 4; signed CDN URLs are independent)",
+    )
+    parser.add_argument(
+        "--prefer-yt-dlp",
+        action="store_true",
+        help="use the old yt-dlp path for every item (A/B comparison)",
+    )
+    parser.add_argument(
+        "--no-yt-dlp-fallback",
+        action="store_true",
+        help="fail items that have no direct media URL instead of falling back to slow yt-dlp",
+    )
+    parser.add_argument(
+        "--include-photos",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="keep image posts as well as videos (default: yes)",
+    )
+
+
 def add_session_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="DevTools endpoint")
     parser.add_argument(
@@ -1364,6 +1511,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="delete the parked originals once the refreshed files look fresh",
     )
+    repair.add_argument(
+        "--refetch",
+        action="store_true",
+        help="re-download every parked item through the per-post media-info route, "
+             "without the saved-collection query that carries the rate limit",
+    )
+    add_session_arguments(repair)
+    add_download_arguments(repair)
     repair.set_defaults(func=command_repair)
 
     diagnose = subparsers.add_parser(
@@ -1398,31 +1553,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="root folder for --all-collections (default: ./instagram-saved)",
     )
     sync.add_argument("--state-file", type=Path)
-    sync.add_argument("--limit", type=int)
-    sync.add_argument("--dry-run", action="store_true")
-    sync.add_argument("--no-retry-failed", action="store_true")
-    sync.add_argument(
-        "--jobs",
-        type=int,
-        default=4,
-        help="parallel media downloads (default: 4; signed CDN URLs are independent)",
-    )
-    sync.add_argument(
-        "--prefer-yt-dlp",
-        action="store_true",
-        help="use the old yt-dlp path for every item (A/B comparison)",
-    )
-    sync.add_argument(
-        "--no-yt-dlp-fallback",
-        action="store_true",
-        help="fail items that have no direct media URL instead of falling back to slow yt-dlp",
-    )
-    sync.add_argument(
-        "--include-photos",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="keep image posts as well as videos (default: yes)",
-    )
+    add_download_arguments(sync)
     sync.add_argument(
         "--full", action="store_true",
         help="walk every page instead of stopping at already-archived items",
