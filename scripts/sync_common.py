@@ -38,6 +38,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -103,30 +104,37 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
 
 def valid_download(directory: Path) -> bool:
     """Report whether a downloaded item still has usable media on disk."""
-    manifest = directory / "manifest.json"
-    if not manifest.is_file():
-        return False
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
         return False
     media = data.get("media")
     if not isinstance(media, list) or not media:
         return False
+
+    def usable(path: Path) -> bool:
+        try:
+            info = path.stat()
+            return stat.S_ISREG(info.st_mode) and info.st_size > 0
+        except (OSError, ValueError):
+            return False
+
     for raw in media:
+        if not isinstance(raw, str) or not raw or "\x00" in raw:
+            continue
         path = Path(raw)
         if not path.is_absolute():
             path = directory / path
-        if path.is_file() and path.stat().st_size > 0:
+        if usable(path):
             return True
-    # Support older manifests whose paths moved together with their directory.
-    return any(
-        path.is_file()
-        and path.stat().st_size > 0
-        and path.suffix.lower() not in IGNORED_MEDIA_SUFFIXES
-        and not path.name.endswith(".info.json")
-        for path in directory.iterdir()
-    )
+        # Older absolute paths can move with their directory. Only accept the
+        # referenced basename, never unrelated captions or filesystem metadata.
+        relocated = directory / path.name
+        if relocated != path and usable(relocated):
+            return True
+    return False
 
 
 def run_download(
@@ -700,9 +708,12 @@ def sync_items(
         for _platform, item_id, url in pending:
             prepare(item_id)
             landing = item_directory(items[item_id], output_dir, item_id)
-            ok, detail = download_fn(
-                downloader, url, landing, cookies, cookies_from_browser
-            )
+            try:
+                ok, detail = download_fn(
+                    downloader, url, landing, cookies, cookies_from_browser
+                )
+            except Exception as exc:
+                ok, detail = False, f"unexpected download error: {exc}"
             if ok:
                 landing = finish(landing)
             record(item_id, ok, detail, landing)
