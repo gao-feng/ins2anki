@@ -689,6 +689,22 @@ class KnownShortcodesTest(unittest.TestCase):
             self.assertEqual(BROWSER_SYNC.known_shortcodes(state_file), {"Ddone"})
             self.assertEqual(BROWSER_SYNC.known_shortcodes(Path(tmp) / "nope.json"), set())
 
+    def test_the_full_walk_flag_is_cleared_after_the_sweep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "sync-state.json"
+            state_file.write_text(json.dumps({
+                "items": {"Ddone": {"status": "completed"}},
+                "full_walk_pending": True,
+            }), encoding="utf-8")
+            self.assertTrue(BROWSER_SYNC.full_walk_pending(state_file))
+            self.assertFalse(BROWSER_SYNC.full_walk_pending(Path(tmp) / "nope.json"))
+            BROWSER_SYNC.clear_full_walk(state_file)
+            self.assertFalse(BROWSER_SYNC.full_walk_pending(state_file))
+            # a missing flag clears to a no-op, and items survive the rewrite
+            BROWSER_SYNC.clear_full_walk(state_file)
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(list(state["items"]), ["Ddone"])
+
 
 class _RetiringSession:
     """An InstagramSession whose REST route 404s, counting the probes."""

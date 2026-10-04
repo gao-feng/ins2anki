@@ -250,6 +250,9 @@ class RepairTest(unittest.TestCase):
             )
             state = json.loads((root / "wtf" / "sync-state.json").read_text(encoding="utf-8"))
             self.assertEqual(sorted(state["items"]), ["Dfixed", "Dphoto"])
+            # forgotten items sit deep in the collection: the next sync must
+            # walk it in full once, so the state asks for exactly that
+            self.assertTrue(state["full_walk_pending"])
 
     def test_clean_keeps_originals_until_a_playable_replacement_exists(self):
         """The destructive step must never outrun the re-download."""
