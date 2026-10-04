@@ -139,9 +139,8 @@ def download_video(
         "mp4",
         "--write-info-json",
         "--write-description",
-        "--write-thumbnail",
-        "--convert-thumbnails",
-        "jpg",
+        # no --write-thumbnail: the mp4 carries its own poster frame, and a
+        # cover jpg next to every video is a small file nobody asked for
         "--output",
         str(out / URL_PLACEHOLDER),
     ] + ytdlp_args(cookies, cookies_from_browser) + [url]

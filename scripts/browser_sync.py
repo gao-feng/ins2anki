@@ -554,6 +554,39 @@ def find_partials(root: Path) -> list[Path]:
     return sorted(found)
 
 
+def find_sidecar_junk(root: Path) -> list[Path]:
+    """List cover images and audio leftovers that sit next to their video.
+
+    The yt-dlp fallback used to write a converted thumbnail beside every
+    video, and a DASH merge can leave its ``.m4a`` input behind. A jpg counts
+    as junk only when an mp4 with the exact same stem exists in the same
+    directory: carousel images carry ``_1``/``_2`` indexes and different
+    stems, so they are never touched. Parked backups are left to --clean.
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    junk: list[Path] = []
+    for directory in (path.parent for path in root.rglob("manifest.json")):
+        if directory.name.endswith(BACKUP_SUFFIX) or not directory.is_relative_to(root):
+            continue
+        files = {path.name: path for path in directory.iterdir() if path.is_file()}
+        mp4s = {Path(name).stem for name in files if name.lower().endswith(".mp4")}
+        if not mp4s:
+            continue
+        for name, path in files.items():
+            lowered = name.lower()
+            stem = Path(name).stem
+            if lowered.endswith(".jpg") and stem in mp4s:
+                junk.append(path)
+            elif lowered.endswith((".m4a", ".webm")) and any(
+                mp4 == stem or mp4.startswith(stem) or stem.startswith(mp4)
+                for mp4 in mp4s
+            ):
+                junk.append(path)
+    return sorted(junk)
+
+
 def probe_video_codec(path: Path, exe: str | None = None) -> str | None:
     """Return the first video codec of ``path`` (e.g. ``vp9``), or None."""
     exe = exe or shutil.which("ffprobe")
@@ -856,16 +889,17 @@ def command_repair(args: argparse.Namespace) -> int:
             log("note: ffprobe not found; install ffmpeg to detect codecs")
         findings = find_unplayable(root)
     partials = find_partials(root)
-    partial_bytes = sum(path.stat().st_size for path in partials)
+    sidecars = find_sidecar_junk(root)
+    partial_bytes = sum(path.stat().st_size for path in partials + sidecars)
     by_codec: dict[str, int] = {}
     for finding in findings:
         codec = finding.get("codec")
         if codec:
             by_codec[codec] = by_codec.get(codec, 0) + 1
 
-    if getattr(args, "parts", False) and partials:
+    if getattr(args, "parts", False) and (partials or sidecars):
         removed = 0
-        for path in partials:
+        for path in partials + sidecars:
             resolved = path.resolve()
             if not resolved.is_relative_to(root):
                 log(f"refusing to delete {resolved} (outside {root})")
@@ -875,7 +909,11 @@ def command_repair(args: argparse.Namespace) -> int:
                 removed += 1
             except OSError as exc:
                 log(f"could not remove {resolved}: {exc}")
-        log(f"removed {removed} partial file(s), {partial_bytes / 1048576:.1f} MiB")
+        log(
+            f"removed {removed} junk file(s) "
+            f"({len(sidecars)} cover/audio sidecar(s)), "
+            f"{partial_bytes / 1048576:.1f} MiB"
+        )
 
     count_key = "cover_only" if covers_mode else "unplayable"
     if not findings:
@@ -1504,7 +1542,8 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument(
         "--parts",
         action="store_true",
-        help="delete leftover partial files (*.part, *.ytdl) from interrupted runs",
+        help="delete leftover partial files (*.part, *.ytdl) and cover/audio "
+             "sidecars sitting next to their video",
     )
     repair.add_argument(
         "--clean",

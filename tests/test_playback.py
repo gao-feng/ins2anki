@@ -143,6 +143,42 @@ class RepairTest(unittest.TestCase):
                 }
             state_file.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_sidecar_junk_targets_covers_and_merge_leftovers_only(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            # a video with its converted thumbnail and a dash merge leftover
+            video_dir = root / "自然" / "Dv1"
+            video_dir.mkdir(parents=True)
+            (video_dir / "Dv1_user.mp4").write_bytes(b"video")
+            (video_dir / "Dv1_user.jpg").write_bytes(b"cover")
+            (video_dir / "Dv1_user.fdash-123a.m4a").write_bytes(b"audio")
+            (video_dir / "manifest.json").write_text("{}", encoding="utf-8")
+            # an image-only item: its jpg IS the content
+            image_dir = root / "自然" / "Dp1"
+            image_dir.mkdir(parents=True)
+            (image_dir / "Dp1_user.jpg").write_bytes(b"photo")
+            (image_dir / "manifest.json").write_text("{}", encoding="utf-8")
+            # a carousel: indexed images are content, only the matching cover goes
+            carousel_dir = root / "自然" / "Dc1"
+            carousel_dir.mkdir(parents=True)
+            (carousel_dir / "Dc1_user_1.jpg").write_bytes(b"photo1")
+            (carousel_dir / "Dc1_user_2.mp4").write_bytes(b"video2")
+            (carousel_dir / "Dc1_user_2.jpg").write_bytes(b"cover2")
+            (carousel_dir / "manifest.json").write_text("{}", encoding="utf-8")
+            # a parked backup: --clean's business, not ours
+            parked = root / "自然" / "Dold.unplayable"
+            parked.mkdir(parents=True)
+            (parked / "Dold_user.jpg").write_bytes(b"cover")
+            (parked / "Dold_user.mp4").write_bytes(b"video")
+            (parked / "manifest.json").write_text("{}", encoding="utf-8")
+            junk = BROWSER_SYNC.find_sidecar_junk(root)
+            names = sorted(path.name for path in junk)
+            self.assertEqual(names, [
+                "Dc1_user_2.jpg",
+                "Dv1_user.fdash-123a.m4a",
+                "Dv1_user.jpg",
+            ])
+
     def test_parked_backlog_groups_items_by_collection(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

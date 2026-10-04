@@ -467,6 +467,16 @@ def browser_executable() -> str | None:
 class FavoritesBrowserTest(unittest.TestCase):
     """Drive headless Chromium against the mock 收藏 page, end to end."""
 
+    def setUp(self):
+        # an isolated HOME keeps the per-platform lock away from any real sync
+        # that happens to be running while the suite executes
+        self._home = tempfile.TemporaryDirectory()
+        self._patcher = mock.patch.dict(os.environ, {"HOME": self._home.name})
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+        self.addCleanup(self._home.cleanup)
+
+
     @classmethod
     def setUpClass(cls):
         executable = browser_executable()
