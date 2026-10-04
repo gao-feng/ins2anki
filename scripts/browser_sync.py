@@ -581,13 +581,12 @@ def find_sidecar_junk(root: Path) -> list[Path]:
             continue
         for name, path in files.items():
             lowered = name.lower()
-            stem = Path(name).stem
-            if lowered.endswith(".jpg") and stem in mp4s:
+            if lowered.endswith(".jpg") and Path(name).stem in mp4s:
                 junk.append(path)
-            elif lowered.endswith((".m4a", ".webm")) and any(
-                mp4 == stem or mp4.startswith(stem) or stem.startswith(mp4)
-                for mp4 in mp4s
-            ):
+            elif lowered.endswith((".m4a", ".webm")):
+                # a DASH merge names its tracks differently (``...v.mp4`` vs
+                # ``...a.m4a``), so any audio leftover beside an mp4 is junk:
+                # Instagram posts are never audio-only
                 junk.append(path)
     return sorted(junk)
 
