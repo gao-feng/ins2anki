@@ -32,7 +32,6 @@ import random
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import unicodedata
 import urllib.error
@@ -812,9 +811,8 @@ class InstagramSession:
         self.reuse_tab = reuse_tab
         self.target: dict | None = None
         self.session: cdp.CdpSession | None = None
-        # download workers share this session, and one CDP socket cannot carry
-        # two interleaved commands: message ids and their replies would cross
-        self._evaluate_lock = threading.Lock()
+        # CdpSession serializes all commands, including origin checks and
+        # navigation, so download workers cannot consume each other's replies.
 
     # -- lifecycle -------------------------------------------------------
 
@@ -853,8 +851,7 @@ class InstagramSession:
     def evaluate(self, expression: str, timeout: float | None = None) -> Any:
         if self.session is None:
             raise SessionError("session is not connected")
-        with self._evaluate_lock:
-            return self.session.evaluate(expression, timeout=timeout or self.timeout)
+        return self.session.evaluate(expression, timeout=timeout or self.timeout)
 
     def origin_ready(self) -> bool:
         """Make sure the tab is on instagram.com so relative fetches work."""

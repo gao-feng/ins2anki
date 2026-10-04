@@ -25,6 +25,7 @@ import os
 import socket
 import ssl
 import struct
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -345,6 +346,7 @@ class CdpSession:
         self.timeout = timeout
         self._socket: WebSocket | None = None
         self._next_id = 0
+        self._command_lock = threading.Lock()
         self.events: list[dict] = []
 
     # -- lifecycle -------------------------------------------------------
@@ -377,6 +379,22 @@ class CdpSession:
 
         Domain events received while waiting are appended to :attr:`events`.
         """
+        budget = timeout if timeout is not None else self.timeout
+        deadline = time.monotonic() + budget
+        if not self._command_lock.acquire(timeout=max(budget, 0.0)):
+            raise CdpError(f"{method} timed out waiting for the CDP command channel ({budget}s)")
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CdpError(f"{method} timed out waiting for the CDP command channel ({budget}s)")
+            return self._call(method, params, timeout=remaining)
+        finally:
+            self._command_lock.release()
+
+    def _call(
+        self, method: str, params: dict | None, timeout: float
+    ) -> dict:
+        """Exchange one command while holding the shared socket lock."""
         if self._socket is None:
             raise CdpError("CDP session is not connected")
         self._next_id += 1
