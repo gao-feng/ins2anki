@@ -109,6 +109,14 @@ class SessionError(RuntimeError):
     """Raised when no usable browser session is available."""
 
 
+class MediaDownloadError(SessionError):
+    """A CDN HTTP failure whose status can trigger a signed-URL refresh."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 class RateLimitedError(SessionError):
     """Instagram refused the query because its quota for this session is spent."""
 
@@ -203,9 +211,19 @@ globalThis.__ins2anki = (() => {
     "x-requested-with": "XMLHttpRequest",
   };
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const getJson = async (path) => {
-    const response = await fetch(path, { credentials: "include", headers });
-    const text = await response.text();
+  const getJson = async (path, timeoutMs = 0) => {
+    const controller = new AbortController();
+    const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    let response, text;
+    try {
+      response = await fetch(path, { credentials: "include", headers, signal: controller.signal });
+      text = await response.text();
+    } catch (err) {
+      if (controller.signal.aborted) throw new Error(`Request timed out for ${path}`);
+      throw err;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
     if (!response.ok) {
       // an HTML body is the SPA shell and carries no diagnostic value; a
       // JSON body (rate limits, login walls) is worth keeping a prefix of
@@ -386,7 +404,7 @@ _JS_MEDIA_INFO = """
 (async () => {
   const pk = %(pk)s;
   await __ins2anki.sleep(%(delay_ms)s);
-  const payload = await __ins2anki.getJson(`/api/v1/media/${encodeURIComponent(pk)}/info/`);
+  const payload = await __ins2anki.getJson(`/api/v1/media/${encodeURIComponent(pk)}/info/`, %(fetch_timeout_ms)s);
   if (payload.status === "fail") {
     throw new Error(`Instagram refused media ${pk}: ${payload.message || "unknown"}`);
   }
@@ -724,10 +742,27 @@ def download_url(
         expected: int | None = None
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
+                content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
+                if content_type in {"text/html", "application/json"}:
+                    partial.unlink(missing_ok=True)
+                    raise MediaDownloadError(
+                        f"media download returned {content_type} instead of media", response.status
+                    )
                 if response.status == 206:
-                    start, _, total = str(
-                        response.headers.get("Content-Range") or ""
-                    ).partition("/")
+                    content_range = re.fullmatch(
+                        r"bytes (\d+)-(\d+)/(\d+)",
+                        str(response.headers.get("Content-Range") or ""),
+                    )
+                    if (content_range is None
+                            or int(content_range[1]) != resume_from
+                            or int(content_range[2]) < int(content_range[1])
+                            or int(content_range[2]) >= int(content_range[3])):
+                        # Never append bytes from a different offset to a partial.
+                        last_error = "invalid Content-Range for resumed download"
+                        partial.unlink(missing_ok=True)
+                        time.sleep(_retry_delay(attempt, retry_base))
+                        continue
+                    total = content_range[3]
                     if total.isdigit():
                         expected = int(total)
                         if resume_from > expected:
@@ -759,10 +794,18 @@ def download_url(
                 body = exc.read(200).decode("utf-8", "replace")
             except Exception:  # pragma: no cover - diagnostics only
                 pass
+            finally:
+                exc.close()
             last_error = f"HTTP {exc.code} for {url} {body}".strip()
+            if exc.code == 416 and resume_from and attempt < attempts:
+                # A stale or already-full partial cannot satisfy the range.
+                # Restart once with a plain request instead of failing the item.
+                partial.unlink(missing_ok=True)
+                time.sleep(_retry_delay(attempt, retry_base))
+                continue
             if exc.code not in RETRYABLE_STATUS or attempt >= attempts:
                 partial.unlink(missing_ok=True)
-                raise SessionError(f"media download failed: {last_error}") from exc
+                raise MediaDownloadError(f"media download failed: {last_error}", exc.code) from exc
             time.sleep(_retry_delay(attempt, retry_base))
             continue
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
@@ -921,6 +964,7 @@ class InstagramSession:
         script = js_prelude() + _JS_MEDIA_INFO % {
             "pk": json.dumps(str(pk)),
             "delay_ms": int(delay_ms),
+            "fetch_timeout_ms": min(20000, max(100, int((timeout or self.timeout) * 500))),
         }
         for attempt in range(3):
             try:
@@ -931,7 +975,11 @@ class InstagramSession:
                     raise RateLimitedError(str(exc)) from exc
                 # A rejected fetch has no HTTP response. Retry this idempotent
                 # read briefly; it is not evidence of an exhausted quota.
-                if "TypeError: Failed to fetch" not in str(exc) or attempt == 2:
+                transient = any(marker in str(exc) for marker in (
+                    "TypeError: Failed to fetch", "Request timed out for ",
+                    "HTTP 500 for ", "HTTP 502 for ", "HTTP 503 for ", "HTTP 504 for ",
+                ))
+                if not transient or attempt == 2:
                     raise
                 time.sleep(0.5 * (2 ** attempt))
         if not isinstance(payload, dict) or not payload.get("pk"):

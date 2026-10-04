@@ -79,3 +79,14 @@ class ParkedBacklogTests(unittest.TestCase):
                 groups, skipped = browser_sync._parked_backlog(Path(tmp))
                 self.assertEqual(skipped, [])
                 self.assertEqual(groups['collection'][0]['pk'], '123')
+
+    def test_corrupt_backups_are_skipped_without_losing_healthy_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, payload in [('bad', []), ('broken', {'metadata': [None]}), ('B7', {'metadata': [{'id': '123', 'shortcode': 'B7'}]})]:
+                directory = root / 'collection' / (name + '.unplayable')
+                directory.mkdir(parents=True)
+                (directory / 'manifest.json').write_text(json.dumps(payload))
+            groups, skipped = browser_sync._parked_backlog(root)
+            self.assertEqual(len(skipped), 2)
+            self.assertEqual(len(groups['collection']), 1)

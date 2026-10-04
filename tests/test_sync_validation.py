@@ -64,3 +64,27 @@ class ValidationTests(unittest.TestCase):
                 state = json.loads((root / 'state.json').read_text())['items']
                 self.assertEqual(state['bad']['status'], 'failed')
                 self.assertEqual(state['good']['status'], 'completed')
+
+class CompleteItemTests(unittest.TestCase):
+    def test_missing_carousel_part_is_not_completed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'first.mp4').write_bytes(b'video')
+            (root / 'manifest.json').write_text(json.dumps({'media': ['first.mp4', 'second.mp4']}))
+            self.assertFalse(sync_common.valid_download(root))
+            (root / 'second.mp4').write_bytes(b'video')
+            self.assertTrue(sync_common.valid_download(root))
+
+    def test_mixed_carousel_cannot_be_completed_by_its_images_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'image.jpg').write_bytes(b'image')
+            (root / 'cover.jpg').write_bytes(b'cover')
+            manifest = {'media': ['image.jpg', 'cover.jpg'], 'metadata': [
+                {'media_type': 8, 'children': [{'media_type': 1}, {'media_type': 2}]}]}
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            self.assertFalse(sync_common.valid_download(root))
+            (root / 'clip.mp4').write_bytes(b'video')
+            manifest['media'][1] = 'clip.mp4'
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            self.assertTrue(sync_common.valid_download(root))

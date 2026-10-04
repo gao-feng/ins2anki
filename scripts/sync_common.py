@@ -120,6 +120,21 @@ def valid_download(directory: Path) -> bool:
         for entry in metadata
     )
 
+    required_parts = 0
+    required_videos = int(expects_video)
+    for entry in metadata if isinstance(metadata, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        children = entry.get("children")
+        if isinstance(children, list):
+            required_parts = max(required_parts, len(children))
+            required_videos = max(required_videos, sum(
+                isinstance(child, dict) and str(child.get("media_type")) == "2"
+                for child in children
+            ))
+    if len(media) < required_parts:
+        return False
+
     def usable(path: Path) -> bool:
         try:
             info = path.stat()
@@ -127,22 +142,23 @@ def valid_download(directory: Path) -> bool:
         except (OSError, ValueError):
             return False
 
+    video_count = 0
     for raw in media:
         if not isinstance(raw, str) or not raw or "\x00" in raw:
-            continue
+            return False
         path = Path(raw)
-        if expects_video and path.suffix.lower() not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
-            continue
+        video_count += path.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
         if not path.is_absolute():
             path = directory / path
         if usable(path):
-            return True
+            continue
         # Older absolute paths can move with their directory. Only accept the
         # referenced basename, never unrelated captions or filesystem metadata.
         relocated = directory / path.name
         if relocated != path and usable(relocated):
-            return True
-    return False
+            continue
+        return False
+    return video_count >= required_videos
 
 
 def run_download(

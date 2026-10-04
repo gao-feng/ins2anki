@@ -423,9 +423,9 @@ def make_session_downloader(
         cookies_from_browser: str | None,
         reason: str,
     ) -> tuple[bool, str]:
-        counters["via_ytdlp"] = counters.get("via_ytdlp", 0) + 1
         if not allow_ytdlp_fallback:
             return False, f"yt-dlp fallback disabled ({reason}); no direct media URL"
+        counters["via_ytdlp"] = counters.get("via_ytdlp", 0) + 1
         log(f"yt-dlp fallback ({reason}): {url}")
         return fallback(downloader, url, output_dir, cookies, cookies_from_browser)
 
@@ -478,7 +478,21 @@ def make_session_downloader(
                     files.append(destination)
                     continue
                 started_at = time.monotonic()
-                size = browser_session.download_url(media["url"], destination)
+                try:
+                    size = browser_session.download_url(media["url"], destination)
+                except browser_session.MediaDownloadError as exc:
+                    if exc.status not in {403, 404, 410} or session is None:
+                        raise
+                    # Signed URLs expire between enumeration and transfer.
+                    # Refresh once, keeping the original carousel position.
+                    refreshed = session.media_info(str(item.get("pk") or ""))
+                    fresh_media = next((part for part in browser_session.item_media(refreshed)
+                                        if part["index"] == media["index"]
+                                        and part["kind"] == media["kind"]), None)
+                    if fresh_media is None or fresh_media["url"] == media["url"]:
+                        raise exc
+                    size = browser_session.download_url(fresh_media["url"], destination)
+                    media_by_url[url] = refreshed
                 seconds = max(time.monotonic() - started_at, 1e-6)
                 log(
                     f"  [{browser_session.item_shortcode(item)}] {destination.name} "
@@ -486,14 +500,12 @@ def make_session_downloader(
                     f"({size / 1048576 / seconds:.1f} MiB/s)"
                 )
                 files.append(destination)
-        except SessionError as exc:
+        except (SessionError, cdp.CdpError) as exc:
             return False, str(exc)
 
         info_json = write_sidecars(item, output_dir)
         manifest = browser_session.build_manifest(item, files, output_dir, info_json=info_json)
-        (output_dir / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        sync_common.write_json_atomic(output_dir / "manifest.json", manifest)
         return True, f"browser session: {len(files)} file(s)"
 
     return download
@@ -708,10 +720,14 @@ def _parked_backlog(root: Path) -> tuple[dict[str, list[dict]], list[str]]:
             manifest = json.loads(
                 (backup / "manifest.json").read_text(encoding="utf-8")
             )
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             skipped.append(backup.name)
             continue
-        meta = (manifest.get("metadata") or [{}])[0]
+        metadata = manifest.get("metadata") if isinstance(manifest, dict) else None
+        if not isinstance(metadata, list) or not metadata or not isinstance(metadata[0], dict):
+            skipped.append(backup.name)
+            continue
+        meta = metadata[0]
         pk = str(meta.get("id") or "").split("_", 1)[0]
         code = str(meta.get("shortcode") or item_id)
         # yt-dlp's id can be the URL shortcode; media-info requires the

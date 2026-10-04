@@ -1687,6 +1687,32 @@ class BrowserIntegrationTest(unittest.TestCase):
         cls.profile.cleanup()
         cls.mock.__exit__(None, None, None)
 
+    def test_page_request_timeout_aborts_a_stalled_body_and_recovers(self):
+        with BROWSER_SESSION.InstagramSession(
+            endpoint=self.endpoint, origin=self.mock.origin, timeout=5
+        ) as session:
+            session.origin_ready()
+            expression = BROWSER_SESSION.js_prelude() + """
+(async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (_path, options) => ({
+    text: () => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+    })
+  });
+  try {
+    await __ins2anki.getJson('/stalled-body', 25);
+    return 'unexpected success';
+  } catch (err) {
+    return err.message;
+  } finally {
+    globalThis.fetch = original;
+  }
+})()
+"""
+            self.assertEqual(session.evaluate(expression), 'Request timed out for /stalled-body')
+            self.assertEqual(session.evaluate('1 + 1'), 2)
+
     def run_cli(self, argv: list[str]) -> tuple[int, str, str]:
         out, err = StringIO(), StringIO()
         with redirect_stdout(out), redirect_stderr(err):
